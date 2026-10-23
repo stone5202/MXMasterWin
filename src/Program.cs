@@ -60,7 +60,7 @@ namespace MXMasterWin
             }
         }
 
-        internal const string Version = "2.2";
+        internal const string Version = "2.2.1";
 
         // Set before closing the main window to start the app again (used after a language change).
         internal static bool RestartRequested;
@@ -1966,9 +1966,12 @@ namespace MXMasterWin
         private DeviceSnapshot lastSnapshot;
         private bool precisionActive;
         private int precisionNormalDpi;
+        private int precisionLowDpi;
         private MouseInput? precisionHeldBy;    // the button holding precision mode on, if any
         private int precisionSeq;               // only the latest requested speed is written
+        private bool precisionRestorePending;   // precision mode is off but the normal speed is not confirmed yet
         private readonly object precisionLock = new object();
+        private int manualDpiSeq;               // precisionSeq when a speed from the pointer page was written
         private bool loadingPrecision;
         // Short haptic waveforms shared by every haptic moment, in menu order (ids follow Solaar;
         // the same list as the macOS version). 0x04 is the ring's default.
@@ -2241,24 +2244,35 @@ namespace MXMasterWin
 
         // Runs once the HID++ channel is up: writes back the device settings saved in the INI
         // when the mouse reports something else, then shows the battery level.
-        private void RestoreDeviceSettings()
+        // seq is the precisionSeq taken when the mouse (re)connected; a newer speed request since then
+        // owns the DPI, so the saved speed is not written over it.
+        private void RestoreDeviceSettings(int seq)
         {
             ThreadPool.QueueUserWorkItem(delegate
             {
                 DeviceSnapshot snapshot = null;
                 var results = new List<string>();
-                try
+                // Under the precision lock so a precision write cannot land between the read and the restore.
+                lock (precisionLock)
                 {
-                    snapshot = hidpp.ReadDevice();
-                    if (snapshot != null && deviceSettings.Restore(hidpp, snapshot, results))
+                    try
+                    {
                         snapshot = hidpp.ReadDevice();
+                        bool ownsDpi = seq == Thread.VolatileRead(ref precisionSeq);
+                        if (snapshot != null && deviceSettings.Restore(hidpp, snapshot, results, ownsDpi))
+                            snapshot = hidpp.ReadDevice();
+                    }
+                    catch { }
                 }
-                catch { }
                 try
                 {
                     if (!IsHandleCreated || IsDisposed) return;
                     BeginInvoke(new Action(delegate
                     {
+                        // An owed precision restore is done once the mouse reports the saved speed.
+                        if (precisionRestorePending && !precisionActive && seq == Thread.VolatileRead(ref precisionSeq)
+                            && snapshot != null && deviceSettings.Dpi > 0 && snapshot.Dpi == deviceSettings.Dpi)
+                            precisionRestorePending = false;
                         ShowBattery(snapshot);
                         if (results.Count == 0) return;
                         LogDeviceLines(results);
@@ -3023,12 +3037,8 @@ namespace MXMasterWin
                     RefreshBattery();
                 });
                 deviceEditor.NormalDpi = delegate { return precisionActive ? precisionNormalDpi : 0; };
-                // A speed applied there is the new normal one, so precision mode is over.
-                deviceEditor.DpiApplied += delegate
-                {
-                    precisionActive = false;
-                    precisionHeldBy = null;
-                };
+                deviceEditor.WriteDpi = WriteManualDpi;
+                deviceEditor.DpiApplied += ManualDpiApplied;
                 deviceEditor.Embed(devicePage, new Point(S(12), S(10)));
             }
             deviceEditor.Reload();
@@ -3214,11 +3224,11 @@ namespace MXMasterWin
                 lowBatteryNotified = false;
                 return;
             }
-            if (percent > LowBatteryThreshold || lowBatteryNotified) return;
+            // While the alert is off nothing is marked as notified, so turning it on still alerts once.
+            if (percent > LowBatteryThreshold || lowBatteryNotified || !lowBatteryAlert.Checked) return;
             lowBatteryNotified = true;
             if (liveLog.Checked)
                 AddLog(DateTime.Now.ToString("HH:mm:ss.fff") + " Battery low: " + percent + "% (threshold " + LowBatteryThreshold + "%)" + (HapticsPaused ? "; haptics paused" : ""));
-            if (!lowBatteryAlert.Checked) return;
             try
             {
                 tray.ShowBalloonTip(8000, Lang.T("MX Master 4 電量低", "MX Master 4 battery low"),
@@ -3334,6 +3344,7 @@ namespace MXMasterWin
 
         // The state changes at once; the speed is written in the background, and only the latest
         // request is written, so a quick press and release always ends at the normal speed.
+        // The hint shows once the mouse confirms the speed; a failed write is retried once, then reported.
         private bool SetPrecision(bool on, bool quiet)
         {
             if (on == precisionActive) return true;
@@ -3351,47 +3362,141 @@ namespace MXMasterWin
                 int low = (int)precisionDpi.Value;
                 if (s.DpiMax > s.DpiMin) low = Math.Max(s.DpiMin, Math.Min(s.DpiMax, low));
                 precisionNormalDpi = normal;
+                precisionLowDpi = low;
                 precisionActive = true;
-                QueueDpi(low, "Precision on");
-                if (!quiet)
-                {
-                    ShowMode(Lang.T("精準模式", "Precision mode"), low + " DPI");
-                    PlayHaptic(modeHaptic, modeHapticWave);
-                }
+                precisionRestorePending = false;
+                QueueDpi(low, true, quiet);
             }
             else
             {
                 precisionActive = false;
                 precisionHeldBy = null;
-                QueueDpi(precisionNormalDpi, "Precision off");
-                if (!quiet)
-                {
-                    ShowMode(Lang.T("指標速度已恢復", "Pointer speed restored"), precisionNormalDpi + " DPI");
-                    PlayHaptic(modeHaptic, modeHapticWave);
-                }
+                precisionRestorePending = true;
+                QueueDpi(precisionNormalDpi, false, quiet);
             }
+            if (!quiet) PlayHaptic(modeHaptic, modeHapticWave);
             return true;
         }
 
-        private void QueueDpi(int dpi, string reason)
+        private void QueueDpi(int dpi, bool on, bool quiet)
         {
             int seq = Interlocked.Increment(ref precisionSeq);
+            string reason = on ? "Precision on" : "Precision off";
             ThreadPool.QueueUserWorkItem(delegate
             {
-                bool ok = false;
+                bool ok = false, retried = false;
                 lock (precisionLock)
                 {
                     if (seq != Thread.VolatileRead(ref precisionSeq)) return;
                     try { ok = hidpp.SetDpi(dpi); }
                     catch { }
+                    if (!ok && seq == Thread.VolatileRead(ref precisionSeq))
+                    {
+                        retried = true;
+                        try { ok = hidpp.SetDpi(dpi); }
+                        catch { }
+                    }
                 }
                 try
                 {
-                    if (liveLog.Checked && IsHandleCreated && !IsDisposed)
-                        BeginInvoke(new Action(delegate { AddLog(DateTime.Now.ToString("HH:mm:ss.fff") + " " + reason + " DPI " + dpi + " verified=" + ok); }));
+                    if (!IsHandleCreated || IsDisposed) return;
+                    BeginInvoke(new Action(delegate { PrecisionWritten(seq, dpi, on, quiet, ok, retried, reason); }));
                 }
                 catch { }
             });
+        }
+
+        // Back on the UI thread. A result is ignored once something newer (another toggle, a reconnect,
+        // a speed applied on the pointer page) has replaced the request.
+        private void PrecisionWritten(int seq, int dpi, bool on, bool quiet, bool ok, bool retried, string reason)
+        {
+            if (liveLog.Checked)
+                AddLog(DateTime.Now.ToString("HH:mm:ss.fff") + " " + reason + " DPI " + dpi + " verified=" + ok + (retried ? " (retried)" : ""));
+            if (seq != Thread.VolatileRead(ref precisionSeq)) return;
+            if (ok)
+            {
+                if (on)
+                {
+                    if (!quiet) ShowMode(Lang.T("精準模式", "Precision mode"), dpi + " DPI");
+                }
+                else
+                {
+                    precisionRestorePending = false;
+                    if (!quiet) ShowMode(Lang.T("指標速度已恢復", "Pointer speed restored"), dpi + " DPI");
+                }
+            }
+            else if (on)
+            {
+                // Not confirmed is not the same as not written (the read-back can time out), so the
+                // normal speed is written again and stays owed until the mouse confirms it.
+                precisionActive = false;
+                precisionHeldBy = null;
+                precisionRestorePending = true;
+                QueueDpi(precisionNormalDpi, false, true);
+                if (!quiet) modeOverlay.ShowMode(Lang.T("精準模式未能開啟", "Precision mode failed"), Lang.T("無法寫入滑鼠速度", "Couldn't set the mouse speed"));
+            }
+            else
+            {
+                // Still owed: written again on exit, and the saved speed is restored on reconnect.
+                if (!quiet) modeOverlay.ShowMode(Lang.T("指標速度未能恢復", "Pointer speed not restored"), String.Format(Lang.T("重新連線後會套用 {0} DPI", "{0} DPI is applied on reconnect"), dpi));
+            }
+        }
+
+        // A speed applied on the pointer page (runs on a worker thread). It cancels queued precision
+        // writes and shares their lock, so an older precision write cannot land after it.
+        private bool WriteManualDpi(int value)
+        {
+            int seq = Interlocked.Increment(ref precisionSeq);
+            Interlocked.Exchange(ref manualDpiSeq, seq);
+            bool ok = false;
+            lock (precisionLock)
+            {
+                try { ok = hidpp.SetDpi(value); }
+                catch { }
+            }
+            if (!ok)
+            {
+                try
+                {
+                    if (IsHandleCreated && !IsDisposed)
+                        BeginInvoke(new Action(delegate { ManualDpiFailed(seq); }));
+                }
+                catch { }
+            }
+            return ok;
+        }
+
+        // The write above cancelled an owed restore; queue it again.
+        private void ManualDpiFailed(int seq)
+        {
+            if (seq != Thread.VolatileRead(ref precisionSeq)) return;
+            if (precisionRestorePending && !precisionActive) QueueDpi(precisionNormalDpi, false, true);
+        }
+
+        // The new speed is the normal one now.
+        private void ManualDpiApplied(int value)
+        {
+            precisionNormalDpi = value;
+            if (Thread.VolatileRead(ref precisionSeq) == Thread.VolatileRead(ref manualDpiSeq))
+            {
+                // Nothing else was written since, so the mouse is at the new speed and precision mode is over.
+                precisionActive = false;
+                precisionHeldBy = null;
+                precisionRestorePending = false;
+                Interlocked.Increment(ref precisionSeq);
+            }
+            else if (!precisionActive)
+            {
+                // Precision mode was switched off during the write and may have put the old speed back after it.
+                precisionRestorePending = true;
+                QueueDpi(value, false, true);
+            }
+            else
+            {
+                // Precision mode was switched on during the write, which may have landed after the slow
+                // speed; write the slow speed again. Releasing it restores the new speed.
+                QueueDpi(precisionLowDpi, true, true);
+            }
         }
 
         private bool ToggleWheelMode()
@@ -4116,6 +4221,8 @@ namespace MXMasterWin
         private void OnHidppReady(int deviceIndex, int featureIndex)
         {
             rawInput.ConfigureHidppDiversion(deviceIndex, featureIndex);
+            // The saved speed is written back below, so any queued precision write is out of date.
+            int restoreSeq = Interlocked.Increment(ref precisionSeq);
             try
             {
                 // A button state left over from before a reconnect would swallow the next press.
@@ -4126,14 +4233,16 @@ namespace MXMasterWin
                     // After a ring click that switched computers, its release never arrived here.
                     swallowLeftUp = false;
                     swallowRightUp = false;
-                    // The saved speed is written back on (re)connect, which ends precision mode.
+                    // The saved speed is written back on (re)connect, which ends precision mode. The
+                    // restore stays owed until RestoreDeviceSettings sees the normal speed on the mouse.
+                    if (precisionActive) precisionRestorePending = true;
                     precisionActive = false;
                     precisionHeldBy = null;
                     MouseArrived();
                 }));
             }
             catch { }
-            RestoreDeviceSettings();
+            RestoreDeviceSettings(restoreSeq);
             RefreshHosts();
         }
 
@@ -4331,23 +4440,30 @@ namespace MXMasterWin
                 gestureActive = false;
                 overlay.Hide();
             }
-            int normalDpi = precisionActive ? precisionNormalDpi : -1;
+            int normalDpi = precisionActive || precisionRestorePending ? precisionNormalDpi : -1;
+            // Cancels any queued precision write now; the restore stays owed (and is retried on exit)
+            // until the mouse confirms it.
+            int restoreSeq = normalDpi > 0 ? Interlocked.Increment(ref precisionSeq) : 0;
             precisionActive = false;
             precisionHeldBy = null;
+            precisionRestorePending = normalDpi > 0;
             int haptic = flowHaptic.Checked && !HapticsPaused ? WaveId(flowHapticWave) : -1;
             if (liveLog.Checked)
                 AddLog(DateTime.Now.ToString("HH:mm:ss.fff") + " Switch host -> " + host + " (" + reason + ")");
             ThreadPool.QueueUserWorkItem(delegate
             {
-                bool sent = false;
+                bool sent = false, restored = false;
                 // Leaving in precision mode would keep the slow speed on the other computer.
                 if (normalDpi > 0)
                 {
-                    Interlocked.Increment(ref precisionSeq);
                     lock (precisionLock)
                     {
-                        try { hidpp.SetDpi(normalDpi); }
-                        catch { }
+                        // Skipped when exit (or a newer request) already took over the restore.
+                        if (restoreSeq == Thread.VolatileRead(ref precisionSeq))
+                        {
+                            try { restored = hidpp.SetDpi(normalDpi); }
+                            catch { }
+                        }
                     }
                 }
                 try { sent = hidpp.ChangeHost(host, haptic); }
@@ -4357,8 +4473,14 @@ namespace MXMasterWin
                     if (!IsHandleCreated || IsDisposed) return;
                     BeginInvoke(new Action(delegate
                     {
+                        if (restored && restoreSeq == Thread.VolatileRead(ref precisionSeq))
+                            precisionRestorePending = false;
                         if (liveLog.Checked)
+                        {
+                            if (normalDpi > 0)
+                                AddLog(DateTime.Now.ToString("HH:mm:ss.fff") + " Precision restore DPI " + normalDpi + " verified=" + restored);
                             AddLog(DateTime.Now.ToString("HH:mm:ss.fff") + " Switch host sent=" + sent);
+                        }
                         if (!sent) return;
                         hostCheck.Stop();
                         hostCheck.Start();
@@ -4470,9 +4592,10 @@ namespace MXMasterWin
                 appearanceSave.Stop();
                 SaveSettings();
             }
-            if (precisionActive)
+            if (precisionActive || precisionRestorePending)
             {
-                // Put the normal speed back before the HID++ channel goes away.
+                // Put the normal speed back before the HID++ channel goes away; this also covers a
+                // restore that was just queued and has not run yet (it is cancelled by the new sequence).
                 Interlocked.Increment(ref precisionSeq);
                 lock (precisionLock)
                 {
@@ -6609,9 +6732,15 @@ namespace MXMasterWin
         // anything was written; each attempt is described in results.
         public bool Restore(HidppDiversionManager hidpp, DeviceSnapshot s, List<string> results)
         {
+            return Restore(hidpp, s, results, true);
+        }
+
+        // includeDpi is false when a newer speed request (precision mode or the pointer page) owns the DPI.
+        public bool Restore(HidppDiversionManager hidpp, DeviceSnapshot s, List<string> results, bool includeDpi)
+        {
             bool wrote = false;
             bool dpiInRange = s.DpiMax <= s.DpiMin || (Dpi >= s.DpiMin && Dpi <= s.DpiMax);
-            if (Dpi > 0 && s.DpiFeature == 0x2201 && s.Dpi != Dpi && dpiInRange)
+            if (includeDpi && Dpi > 0 && s.DpiFeature == 0x2201 && s.Dpi != Dpi && dpiInRange)
             {
                 results.Add("restore DPI " + Dpi + " verified=" + hidpp.SetDpi(Dpi));
                 wrote = true;
@@ -6662,7 +6791,9 @@ namespace MXMasterWin
         // normal one to show instead (0 = use what the mouse reports).
         public Func<int> NormalDpi;
         // Raised after a new speed was applied here; it becomes the normal speed.
-        public event Action DpiApplied;
+        public event Action<int> DpiApplied;
+        // Set by MainForm so the write is ordered with precision-mode writes (null = write directly).
+        public Func<int, bool> WriteDpi;
 
         public DeviceDialog(HidppDiversionManager manager, Action<IEnumerable<string>> logAction,
             DeviceSettings savedSettings, Action saveAction)
@@ -6696,12 +6827,13 @@ namespace MXMasterWin
                 if (s == null || s.DpiStep <= 0) return;
                 int steps = (int)Math.Round(((int)dpi.Value - s.DpiMin) / (double)s.DpiStep);
                 int value = Math.Max(s.DpiMin, Math.Min(s.DpiMax, s.DpiMin + steps * s.DpiStep));
-                RunWrite("DPI " + value, delegate { return hidpp.SetDpi(value); },
+                Func<int, bool> writer = WriteDpi;
+                RunWrite("DPI " + value, delegate { return writer != null ? writer(value) : hidpp.SetDpi(value); },
                     delegate
                     {
                         saved.Dpi = value;
-                        Action handler = DpiApplied;
-                        if (handler != null) handler();
+                        Action<int> handler = DpiApplied;
+                        if (handler != null) handler(value);
                     });
             };
 
