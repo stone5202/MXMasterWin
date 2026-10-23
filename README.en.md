@@ -12,7 +12,7 @@ MX Master Win is a portable Windows utility for the Logitech MX Master 4. It is 
 
 It is the Windows edition of the same product as [MX Master Mac](https://github.com/stone5202/MXMasterMac) for macOS, with the same features and the same way of setting them up. Run one edition on each computer and MX Flow takes the mouse back and forth between Windows and Mac.
 
-> Current version: 2.2 · Interface languages: Traditional Chinese, English (follows the system by default)
+> Current version: 2.2.1 · Interface languages: Traditional Chinese, English (follows the system by default)
 >
 > Up to 1.1 the app was called MX Master Portable. Put the new `MXMasterWin.exe` in the same folder and it picks up the old settings file on first run.
 

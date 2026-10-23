@@ -12,7 +12,7 @@ MX Master Win 是給 Logitech MX Master 4 用的免安裝 Windows 小工具：�
 
 它和 macOS 版 [MX Master Mac](https://github.com/stone5202/MXMasterMac) 是同一個產品的兩個版本，功能與設定方式一致；兩台電腦各裝一個版本，就能用 MX Flow 在 Windows 與 Mac 之間來回切換。
 
-> 目前版本：2.2 · 介面語言：繁體中文、English（預設跟隨系統）
+> 目前版本：2.2.1 · 介面語言：繁體中文、English（預設跟隨系統）
 >
 > 1.1 以前的名稱是 MX Master Portable。把新的 `MXMasterWin.exe` 放在原本的資料夾，第一次執行時會自動沿用舊的設定檔。
 
