@@ -54,6 +54,14 @@ See the [changelog](CHANGELOG.en.md) or [GitHub Releases](https://github.com/sto
   Haptics · Battery
 </p>
 
+<p align="center">
+  <img src="docs/screenshots/keyboard.en.png" width="80%" alt="Keyboard page: backlight, top row and the keyboard following the mouse">
+</p>
+
+<p align="center">
+  Keyboard
+</p>
+
 ## Download and use
 
 1. Download `MXMasterWin.exe` from [Releases](https://github.com/stone5202/MXMasterWin/releases/latest).

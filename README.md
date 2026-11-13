@@ -54,6 +54,14 @@ MX Master Win 是給 Logitech MX Master 4 用的免安裝 Windows 小工具：�
   觸覺回饋 · 電池
 </p>
 
+<p align="center">
+  <img src="docs/screenshots/keyboard.zh-TW.png" width="80%" alt="鍵盤頁：背光、最上排按鍵與鍵盤跟著滑鼠一起切換">
+</p>
+
+<p align="center">
+  鍵盤
+</p>
+
 ## 下載與使用
 
 1. 到 [Releases](https://github.com/stone5202/MXMasterWin/releases/latest) 下載 `MXMasterWin.exe`。
