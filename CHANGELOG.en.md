@@ -4,6 +4,13 @@
   <a href="CHANGELOG.md">繁體中文</a> · <strong>English</strong>
 </p>
 
+## 2.3.1 — 2026-11-14
+
+- Fix: a keyboard on a Logi Bolt receiver sleeps after a while idle, and the Keyboard page and the bottom-left corner then lost it for a while. The last reading is now kept and marked as not answering, and it comes back as soon as a key is pressed.
+- Fix: when the mouse moved to another computer while the keyboard was asleep, the keyboard stayed behind. The switch is now queued and sent as soon as the keyboard wakes (any key) within 60 seconds; it is cancelled if the mouse comes back first.
+- Fix: with the mouse and a Logitech keyboard that supports button diversion (an MX Mechanical, for one) on the same Logi Bolt receiver and the keyboard in an earlier slot, the app took the keyboard for the mouse, showed "The device reported no divertable C3 / 1A0 controls", left the special buttons dead, and kept sending requests to the keyboard, so the Keyboard page often lost it too. The device type is now checked and slots that are not a mouse are skipped.
+- Fix: with the mouse and the keyboard on the same Logi Bolt receiver, the keyboard took a long time to be found (sometimes a minute or two), and with the Keyboard page open it kept coming and going as not answering although it typed fine. An idle Bolt device answers its first request only after about a second, longer than the app waited, and the keyboard's traffic was taken for mouse activity, so the app kept reconnecting to the mouse. The app now waits long enough, moves on as soon as the receiver reports a slot empty, skips the mouse's slot, and counts only the mouse's own reports as mouse activity; when the keyboard comes back from another computer or wakes up, it is read as soon as the receiver announces it.
+
 ## 2.3 — 2026-11-13
 
 - New Keyboard page (between Battery and Advanced) for a Logitech keyboard, connected over Bluetooth or sharing the Logi Bolt receiver with the mouse. It shows connection, battery and firmware, and sets the backlight (automatic, manual brightness or off) and whether the top row sends media keys or F1–F12. Settings live on the keyboard and count as applied once it confirms them.
