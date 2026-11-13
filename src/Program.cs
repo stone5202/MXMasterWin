@@ -60,7 +60,7 @@ namespace MXMasterWin
             }
         }
 
-        internal const string Version = "2.2.1";
+        internal const string Version = "2.3";
 
         // Set before closing the main window to start the app again (used after a language change).
         internal static bool RestartRequested;
@@ -1814,12 +1814,19 @@ namespace MXMasterWin
         public bool Connected;
         public int BatteryPercent = -1;
         public bool Charging;
+        // A second row for the keyboard while one is connected (KeyboardPercent >= 0); MainForm makes
+        // the chip taller then.
+        public int KeyboardPercent = -1;
+        public bool KeyboardCharging;
+        public string KeyboardText = "";
 
         public BatteryChip()
         {
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
         }
+
+        public bool TwoRows { get { return KeyboardPercent >= 0; } }
 
         protected override void OnPaint(PaintEventArgs e)
         {
@@ -1835,17 +1842,38 @@ namespace MXMasterWin
                 g.DrawPath(border, path);
             }
 
-            float x = 12F * scale;
-            float middle = Height / 2F;
-            Color state = Connected ? Theme.Good : Theme.Warning;
-            if (BatteryPercent >= 0)
+            if (!TwoRows)
             {
-                bool low = BatteryPercent <= 20 && !Charging;
+                DrawRow(g, Height / 2F, null, Connected, BatteryPercent, Charging, ConnectionText);
+                return;
+            }
+            // Mouse on top, keyboard below, each marked with its Segoe MDL2 glyph (Mouse, KeyboardClassic).
+            DrawRow(g, Height * 0.29F, "\uE962", Connected, BatteryPercent, Charging, ConnectionText);
+            DrawRow(g, Height * 0.71F, "\uE765", true, KeyboardPercent, KeyboardCharging, KeyboardText);
+        }
+
+        private void DrawRow(Graphics g, float middle, string glyph, bool connected, int percentValue, bool charging, string connection)
+        {
+            float x = 12F * scale;
+            if (glyph != null && Theme.IconFont != null)
+            {
+                using (var icon = new Font(Theme.IconFont, 9F))
+                using (var muted = new SolidBrush(Theme.Muted))
+                {
+                    SizeF size = g.MeasureString(glyph, icon);
+                    g.DrawString(glyph, icon, muted, x, middle - size.Height / 2F);
+                }
+                x += 20F * scale;
+            }
+            Color state = connected ? Theme.Good : Theme.Warning;
+            if (percentValue >= 0)
+            {
+                bool low = percentValue <= 20 && !charging;
                 Color level = low ? Color.FromArgb(220, 70, 70) : Theme.Good;
                 using (var bold = new Font(Theme.UiFont, 9.5F, FontStyle.Bold))
                 using (var ink = new SolidBrush(level))
                 {
-                    string percent = BatteryPercent + "%";
+                    string percent = percentValue + "%";
                     SizeF size = g.MeasureString(percent, bold);
                     g.DrawString(percent, bold, ink, x, middle - size.Height / 2F);
                     x += size.Width + 4F * scale;
@@ -1857,7 +1885,7 @@ namespace MXMasterWin
                     using (var outline = new Pen(level, 1.3F * scale))
                     {
                         g.FillRectangle(ink, x + inset, top + inset,
-                            Math.Max(2F * scale, (bodyWidth - inset * 2F) * Math.Min(100, BatteryPercent) / 100F), bodyHeight - inset * 2F);
+                            Math.Max(2F * scale, (bodyWidth - inset * 2F) * Math.Min(100, percentValue) / 100F), bodyHeight - inset * 2F);
                         g.DrawPath(outline, body);
                         g.FillRectangle(ink, x + bodyWidth + 1F * scale, middle - 2.5F * scale, 2F * scale, 5F * scale);
                     }
@@ -1872,7 +1900,7 @@ namespace MXMasterWin
                 x += dot + 8F * scale;
             }
 
-            string text = ConnectionText + (Charging ? Lang.T("・充電中", " · charging") : "");
+            string text = connection + (charging ? Lang.T("・充電中", " · charging") : "");
             using (var font = new Font(Theme.UiFont, 9F))
             using (var muted = new SolidBrush(Theme.Muted))
             {
@@ -2009,6 +2037,31 @@ namespace MXMasterWin
         private readonly string diagnosticLogPath;
         private readonly RawInputMonitor rawInput;
         private readonly HidppDiversionManager hidpp;
+        // Keyboard page: a Logitech keyboard's status, backlight and top row, and following the mouse.
+        private readonly KeyboardManager keyboard;
+        private KeyboardSnapshot keyboardSnapshot;
+        private int keyboardBusy;
+        private readonly System.Windows.Forms.Timer keyboardTimer = new System.Windows.Forms.Timer();
+        private readonly System.Windows.Forms.Timer keyboardLevelApply = new System.Windows.Forms.Timer();
+        private readonly Label keyboardName = new Label();
+        // The keyboard's name in bold; the longer not-found explanation in a lighter, smaller hint style.
+        private readonly Font keyboardNameFont = new Font(Theme.UiFont, 10F, FontStyle.Bold);
+        private readonly Font keyboardMissingFont = new Font(Theme.UiFont, 9.5F);
+        private readonly Label keyboardConnection = new Label();
+        private readonly Label keyboardBattery = new Label();
+        private readonly Label keyboardFirmware = new Label();
+        private readonly ComboBox keyboardBacklight = new ComboBox();
+        private readonly List<int> keyboardBacklightChoices = new List<int>();   // -1 off, 1 automatic, 3 manual, other = keyboard's own
+        private readonly Label keyboardLevelLabel = new Label();
+        private readonly SliderBar keyboardLevel = new SliderBar();
+        private readonly Label keyboardLevelValue = new Label();
+        private readonly ComboBox keyboardTopRow = new ComboBox();
+        private readonly CheckBox keyboardFollow = new ToggleSwitch();
+        private readonly Label[] keyboardRowLabels = new Label[3];
+        private readonly ComboBox[] keyboardRowTargets = new ComboBox[3];
+        // Per mouse channel: -2 automatic, -1 keyboard stays, 0.. keyboard channel.
+        private readonly int[] keyboardChannels = { -2, -2, -2 };
+        private bool loadingKeyboard;
         private readonly GestureOverlay overlay = new GestureOverlay();
         private readonly ActionRingOverlay actionRing = new ActionRingOverlay();
         private bool reallyExit;
@@ -2153,6 +2206,7 @@ namespace MXMasterWin
             };
             rawInput = new RawInputMonitor(this.Handle, AppendRawEvent, OnVendorButton, OnMouseActivity, OnMxMouseMove);
             hidpp = new HidppDiversionManager(OnHidppStatus, OnHidppReady);
+            keyboard = new KeyboardManager(OnKeyboardReport);
             MouseHook.MouseEvent += OnMouseEvent;
             MouseHook.Install();
 
@@ -2200,6 +2254,15 @@ namespace MXMasterWin
                 if (argument.Equals("--show", StringComparison.OrdinalIgnoreCase)) show = true;
             allowShow = show;
             hidpp.Start();
+            // Looks for the keyboard while none is connected (it may come back with Easy-Switch at any
+            // time), and keeps the keyboard page current while it is open.
+            keyboardTimer.Interval = 10000;
+            keyboardTimer.Tick += delegate
+            {
+                if (!keyboard.Connected || pages[6].Visible) RefreshKeyboard(false);
+            };
+            keyboardTimer.Start();
+            RefreshKeyboard(true);
             if (capture) ShowDiagnostics();
             if (!show && !trayHintShown)
             {
@@ -2375,7 +2438,8 @@ namespace MXMasterWin
             AddNavigation(Lang.T("觸覺回饋", "Haptics"), "\uE877", 3);   // Vibrate
             AddNavigation("MX Flow", "", 4);
             AddNavigation(Lang.T("電池", "Battery"), "\uE83F", 5);   // Battery10
-            AddNavigation(Lang.T("進階", "Advanced"), "", 6);
+            AddNavigation(Lang.T("鍵盤", "Keyboard"), "\uE765", 6);   // KeyboardClassic
+            AddNavigation(Lang.T("進階", "Advanced"), "", 7);
 
             chip.Location = new Point(S(24), S(566));
             chip.Size = new Size(S(202), S(36));
@@ -2618,13 +2682,16 @@ namespace MXMasterWin
                 switchPage.Controls.Add(hostLabels[i]);
                 switchPage.Controls.Add(go);
             }
-            AddHint(switchPage, Lang.T("切過去後，另一台電腦也要執行本程式並設定邊緣才能同樣切回來；否則請按滑鼠底部的 Easy-Switch 鍵。不傳送剪貼簿或檔案",
-                "To come back the same way the other computer must run this app with an edge set; otherwise use the Easy-Switch button. No clipboard or files"), 428);
+            AddHint(switchPage, Lang.T("切過去後，另一台電腦也要執行本程式並設定邊緣才能同樣切回來；否則請按 Easy-Switch 鍵。鍵盤一起切換在「鍵盤」頁",
+                "To come back the same way the other computer must run this app with an edge set, or use Easy-Switch. Keyboard: see the Keyboard page"), 428);
 
             // ---- Page 5: battery ----
             BuildBatteryPage(AddPage(Lang.T("電池", "Battery")));
 
-            // ---- Page 6: everything else ----
+            // ---- Page 6: keyboard ----
+            BuildKeyboardPage(AddPage(Lang.T("鍵盤", "Keyboard")));
+
+            // ---- Page 7: everything else ----
             CardPanel advancedPage = AddPage(Lang.T("進階", "Advanced"));
             enableSwitch.Text = Lang.T("啟用按鍵對應", "Enable button mapping");
             enableSwitch.Checked = true;
@@ -2880,6 +2947,333 @@ namespace MXMasterWin
                 Lang.T("精準模式開關、段落／自由滾動切換時", "Precision mode on or off, ratchet / free spin"), 388, 4);
         }
 
+        // Keyboard page: the keyboard's name (or why none was found), connection, battery, firmware,
+        // backlight, top row, and which keyboard channel goes with each mouse channel.
+        private void BuildKeyboardPage(CardPanel page)
+        {
+            int right = 748;
+            keyboardName.AutoSize = false;
+            keyboardName.AutoEllipsis = true;
+            keyboardName.UseMnemonic = false;
+            keyboardName.TextAlign = ContentAlignment.MiddleLeft;
+            keyboardName.Font = keyboardNameFont;
+            keyboardName.Location = new Point(S(18), S(56));
+            // Up to the Reload button, so the not-found explanation fits on one line.
+            keyboardName.Size = new Size(S(right - 110 - 12 - 18), S(24));
+            page.Controls.Add(keyboardName);
+            Button reload = Theme.CreateButton(Lang.T("重新讀取", "Reload"), false);
+            reload.Size = new Size(S(110), S(30));
+            reload.Location = new Point(S(right - 110), S(52));
+            reload.Click += delegate { RefreshKeyboard(true); };
+            page.Controls.Add(reload);
+
+            // The same three facts as the top of the Mac's pointer page: connection, battery, firmware.
+            string[] titles = { Lang.T("連線", "Connection"), Lang.T("電量", "Battery"), Lang.T("韌體", "Firmware") };
+            Label[] values = { keyboardConnection, keyboardBattery, keyboardFirmware };
+            for (int i = 0; i < 3; i++)
+            {
+                int x = 18 + i * 250;
+                page.Controls.Add(new Label { Text = titles[i], AutoSize = true, ForeColor = Theme.Muted, Font = new Font(Theme.UiFont, 8.5F), Location = new Point(S(x), S(88)) });
+                values[i].AutoSize = false;
+                values[i].AutoEllipsis = true;
+                values[i].UseMnemonic = false;
+                values[i].Font = new Font(Theme.UiFont, 11F, FontStyle.Bold);
+                values[i].Location = new Point(S(x), S(106));
+                values[i].Size = new Size(S(230), S(26));
+                values[i].Text = "—";
+                page.Controls.Add(values[i]);
+            }
+            AddDivider(page, 140, S(right - 18));
+
+            page.Controls.Add(new Label { Text = Lang.T("背光", "Backlight"), AutoSize = true, Location = new Point(S(18), S(152)) });
+            AddHint(page, Lang.T("自動：手靠近時亮起、亮度跟著環境光；手動：固定亮度", "Auto: lights up as your hands approach and follows ambient light; Manual: fixed"), 176);
+            keyboardBacklight.DropDownStyle = ComboBoxStyle.DropDownList;
+            keyboardBacklight.Width = S(160);
+            keyboardBacklight.Location = new Point(S(right - 160), S(156));
+            keyboardBacklight.SelectionChangeCommitted += delegate { ApplyKeyboardBacklight(); };
+            page.Controls.Add(keyboardBacklight);
+            keyboardLevelLabel.Text = Lang.T("亮度", "Brightness");
+            keyboardLevelLabel.AutoSize = false;
+            keyboardLevelLabel.Location = new Point(S(18), S(203));
+            keyboardLevelLabel.Size = new Size(S(84), S(22));
+            page.Controls.Add(keyboardLevelLabel);
+            keyboardLevel.Minimum = 0;
+            keyboardLevel.Maximum = 7;
+            keyboardLevel.Location = new Point(S(104), S(200));
+            keyboardLevel.Size = new Size(S(300), S(26));
+            keyboardLevelValue.AutoSize = false;
+            keyboardLevelValue.TextAlign = ContentAlignment.MiddleRight;
+            keyboardLevelValue.Location = new Point(S(410), S(201));
+            keyboardLevelValue.Size = new Size(S(40), S(22));
+            // A drag reports every step; write once it settles.
+            keyboardLevelApply.Interval = 400;
+            keyboardLevelApply.Tick += delegate
+            {
+                keyboardLevelApply.Stop();
+                int level = keyboardLevel.Value;
+                if (keyboardSnapshot == null || level == keyboardSnapshot.BacklightLevel) return;
+                WriteKeyboard(Lang.T("背光亮度", "Backlight brightness"), delegate { return keyboard.SetBacklight(true, 3, level); });
+            };
+            keyboardLevel.ValueChanged += delegate
+            {
+                keyboardLevelValue.Text = keyboardLevel.Value.ToString();
+                if (loadingKeyboard) return;
+                keyboardLevelApply.Stop();
+                keyboardLevelApply.Start();
+            };
+            page.Controls.Add(keyboardLevel);
+            page.Controls.Add(keyboardLevelValue);
+            AddDivider(page, 232, S(right - 18));
+
+            page.Controls.Add(new Label { Text = Lang.T("最上排按鍵預設", "Top row by default"), AutoSize = true, Location = new Point(S(18), S(244)) });
+            AddHint(page, Lang.T("另一種功能要按住 Fn；每個 Easy-Switch 頻道各自記錄，這裡改的是這台電腦", "Hold Fn for the other function. Kept per Easy-Switch channel; this changes this computer's"), 268);
+            keyboardTopRow.DropDownStyle = ComboBoxStyle.DropDownList;
+            keyboardTopRow.Items.Add(Lang.T("媒體鍵", "Media keys"));
+            keyboardTopRow.Items.Add("F1–F12");
+            keyboardTopRow.Width = S(160);
+            keyboardTopRow.Location = new Point(S(right - 160), S(248));
+            keyboardTopRow.SelectionChangeCommitted += delegate
+            {
+                bool media = keyboardTopRow.SelectedIndex == 0;
+                WriteKeyboard(Lang.T("F 鍵", "F-keys"), delegate { return keyboard.SetFnMediaFirst(media); });
+            };
+            page.Controls.Add(keyboardTopRow);
+            AddDivider(page, 296, S(right - 18));
+
+            keyboardFollow.Text = Lang.T("滑鼠切換電腦時鍵盤一起切換（MX Flow、「切換到頻道」與「切換過去」）", "Switch the keyboard with the mouse (MX Flow, Switch-to-channel, Switch)");
+            keyboardFollow.Checked = true;
+            keyboardFollow.Location = new Point(S(18), S(306));
+            keyboardFollow.Size = new Size(S(right - 18), S(26));
+            keyboardFollow.CheckedChanged += delegate
+            {
+                if (loadingKeyboard) return;
+                RefreshKeyboardUi();
+                SaveSettings();
+            };
+            page.Controls.Add(keyboardFollow);
+            for (int i = 0; i < 3; i++)
+            {
+                int mouseChannel = i;
+                keyboardRowLabels[i] = new Label
+                {
+                    AutoSize = false,
+                    AutoEllipsis = true,
+                    UseMnemonic = false,
+                    TextAlign = ContentAlignment.MiddleLeft,
+                    Location = new Point(S(18), S(338 + i * 28)),
+                    Size = new Size(S(390), S(24))
+                };
+                page.Controls.Add(keyboardRowLabels[i]);
+                var combo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = S(320), Location = new Point(S(right - 320), S(338 + i * 28)) };
+                combo.SelectionChangeCommitted += delegate
+                {
+                    // Items: automatic, keyboard channels 1.., then "keyboard stays".
+                    int selected = combo.SelectedIndex;
+                    keyboardChannels[mouseChannel] = selected <= 0 ? -2 : selected == combo.Items.Count - 1 ? -1 : selected - 1;
+                    SaveSettings();
+                };
+                keyboardRowTargets[i] = combo;
+                page.Controls.Add(combo);
+            }
+            AddHint(page, Lang.T("自動：同名電腦的頻道，否則同一頻道號；Bolt 頻道在鍵盤上常記成 Logitech Bolt receiver，請手動指定",
+                "Auto: same computer name, else the same number. Bolt channels often read Logitech Bolt receiver; set them by hand"), 426);
+            RefreshKeyboardUi();
+        }
+
+        private void OnKeyboardReport(string text)
+        {
+            try
+            {
+                if (!IsHandleCreated || IsDisposed) return;
+                BeginInvoke(new Action(delegate
+                {
+                    if (liveLog.Checked) AddLog(DateTime.Now.ToString("HH:mm:ss.fff") + " Keyboard " + text);
+                }));
+            }
+            catch { }
+        }
+
+        // Reads the keyboard on a worker thread (searching for one if needed) and updates the page.
+        private void RefreshKeyboard(bool force)
+        {
+            if (Interlocked.Exchange(ref keyboardBusy, 1) != 0) return;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                KeyboardSnapshot read = null;
+                try { read = keyboard.Refresh(force); }
+                catch { }
+                Interlocked.Exchange(ref keyboardBusy, 0);
+                try
+                {
+                    if (!IsHandleCreated || IsDisposed) return;
+                    BeginInvoke(new Action(delegate
+                    {
+                        // A periodic search that found nothing changes nothing.
+                        if (read == null && keyboardSnapshot == null) return;
+                        SetKeyboardSnapshot(read);
+                    }));
+                }
+                catch { }
+            });
+        }
+
+        private void SetKeyboardSnapshot(KeyboardSnapshot snapshot)
+        {
+            keyboardSnapshot = snapshot;
+            RefreshKeyboardUi();
+            UpdateKeyboardChip();
+        }
+
+        // Bottom-left chip: a second row with the keyboard's battery while a keyboard is connected; the
+        // chip grows upwards into the free space under the navigation.
+        private void UpdateKeyboardChip()
+        {
+            KeyboardSnapshot kb = keyboardSnapshot;
+            chip.KeyboardPercent = kb != null ? kb.BatteryPercent : -1;
+            chip.KeyboardCharging = kb != null && kb.Charging;
+            chip.KeyboardText = kb == null ? "" : kb.Transport == "BOLT" ? "Logi Bolt" : "Bluetooth";
+            chip.Bounds = chip.TwoRows
+                ? new Rectangle(S(24), S(530), S(202), S(72))
+                : new Rectangle(S(24), S(566), S(202), S(36));
+            chip.Invalidate();
+        }
+
+        // Writes one keyboard setting on a worker thread; the keyboard confirms it by reading back.
+        private void WriteKeyboard(string name, Func<bool> write)
+        {
+            status.Text = Lang.T("套用中…", "Applying…");
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                bool ok = false;
+                KeyboardSnapshot read = null;
+                try { ok = write(); }
+                catch { }
+                try { read = keyboard.Refresh(false); }
+                catch { }
+                try
+                {
+                    if (!IsHandleCreated || IsDisposed) return;
+                    BeginInvoke(new Action(delegate
+                    {
+                        if (liveLog.Checked) AddLog(DateTime.Now.ToString("HH:mm:ss.fff") + " Keyboard set " + name + " verified=" + ok);
+                        status.Text = name + (ok ? Lang.T("：已套用", ": applied") : Lang.T("：鍵盤沒有確認，未套用", ": not confirmed by the keyboard"));
+                        SetKeyboardSnapshot(read);
+                    }));
+                }
+                catch { }
+            });
+        }
+
+        private void ApplyKeyboardBacklight()
+        {
+            KeyboardSnapshot kb = keyboardSnapshot;
+            int index = keyboardBacklight.SelectedIndex;
+            if (kb == null || index < 0 || index >= keyboardBacklightChoices.Count) return;
+            int choice = keyboardBacklightChoices[index];
+            bool enabled = choice != -1;
+            int mode = enabled ? choice : kb.BacklightMode;
+            // Off reports brightness 0; switching to manual then uses the middle step so it visibly lights.
+            int level = kb.BacklightLevel >= 1 ? kb.BacklightLevel : Math.Max(1, kb.BacklightLevels / 2);
+            WriteKeyboard(Lang.T("背光", "Backlight"), delegate { return keyboard.SetBacklight(enabled, mode, level); });
+        }
+
+        private string KeyboardHostTitle(int index)
+        {
+            string channel = String.Format(Lang.T("頻道 {0}", "Channel {0}"), index + 1);
+            HostEntry entry = keyboardSnapshot == null ? null : keyboardSnapshot.Hosts.Find(delegate(HostEntry h) { return h.Index == index; });
+            return entry == null || entry.Name.Length == 0 ? channel : channel + " · " + entry.Name;
+        }
+
+        // The keyboard channel that goes with a mouse channel; -1 means the keyboard stays.
+        private int KeyboardChannelFor(int mouseChannel)
+        {
+            int chosen = mouseChannel >= 0 && mouseChannel < keyboardChannels.Length ? keyboardChannels[mouseChannel] : -2;
+            return chosen != -2 ? chosen : AutoKeyboardChannel(mouseChannel);
+        }
+
+        // Automatic: the keyboard channel stored with the same computer name (and the same connection
+        // when several match), otherwise the same channel number. Channels paired through a Bolt receiver
+        // usually carry the receiver's name on the keyboard, so those fall back to the number.
+        private int AutoKeyboardChannel(int mouseChannel)
+        {
+            KeyboardSnapshot kb = keyboardSnapshot;
+            if (kb == null || kb.Hosts.Count == 0) return mouseChannel;
+            HostEntry mouseHost = hosts.Find(delegate(HostEntry h) { return h.Index == mouseChannel; });
+            if (mouseHost != null && mouseHost.Name.Length > 0)
+            {
+                List<HostEntry> same = kb.Hosts.FindAll(delegate(HostEntry h) { return h.Paired && h.Name == mouseHost.Name; });
+                if (same.Count > 1) same = same.FindAll(delegate(HostEntry h) { return h.Bus == mouseHost.Bus; });
+                if (same.Count == 1) return same[0].Index;
+            }
+            HostEntry byNumber = kb.Hosts.Find(delegate(HostEntry h) { return h.Index == mouseChannel; });
+            return byNumber != null && byNumber.Paired ? mouseChannel : -1;
+        }
+
+        private void RefreshKeyboardUi()
+        {
+            if (keyboardRowTargets[0] == null) return;
+            KeyboardSnapshot kb = keyboardSnapshot;
+            loadingKeyboard = true;
+            try
+            {
+                keyboardName.Text = kb == null
+                    ? Lang.T("沒有偵測到連到這台電腦的 Logitech 鍵盤（切到別台、睡眠時也會這樣；按一下鍵盤再重新讀取）",
+                        "No Logitech keyboard on this computer (also while elsewhere or asleep; press a key and reload)")
+                    : (kb.Name.Length == 0 ? Lang.T("Logitech 鍵盤", "Logitech keyboard") : kb.Name);
+                keyboardName.Font = kb == null ? keyboardMissingFont : keyboardNameFont;
+                if (kb == null) keyboardName.ForeColor = Theme.Muted;
+                else keyboardName.ResetForeColor();
+                keyboardConnection.Text = kb == null ? "—" : kb.Transport == "BOLT" ? "Logi Bolt" : "Bluetooth";
+                keyboardBattery.Text = kb == null || kb.BatteryPercent < 0 ? "—"
+                    : kb.BatteryPercent + "%" + (kb.Charging ? Lang.T("（充電中）", " (charging)") : "");
+                keyboardFirmware.Text = kb == null || kb.Firmware.Length == 0 ? "—" : kb.Firmware;
+
+                keyboardBacklight.Items.Clear();
+                keyboardBacklightChoices.Clear();
+                if (kb != null && kb.BacklightPresent)
+                {
+                    if (kb.BacklightAuto) { keyboardBacklight.Items.Add(Lang.T("自動", "Auto")); keyboardBacklightChoices.Add(1); }
+                    if (kb.BacklightManual) { keyboardBacklight.Items.Add(Lang.T("手動", "Manual")); keyboardBacklightChoices.Add(3); }
+                    if (kb.BacklightEnabled && kb.BacklightMode != 1 && kb.BacklightMode != 3)
+                    {
+                        keyboardBacklight.Items.Add(Lang.T("鍵盤預設", "Keyboard default"));
+                        keyboardBacklightChoices.Add(kb.BacklightMode);
+                    }
+                    keyboardBacklight.Items.Add(Lang.T("關閉", "Off"));
+                    keyboardBacklightChoices.Add(-1);
+                    keyboardBacklight.SelectedIndex = keyboardBacklightChoices.IndexOf(kb.BacklightEnabled ? kb.BacklightMode : -1);
+                }
+                keyboardBacklight.Enabled = kb != null && kb.BacklightPresent;
+                bool manual = kb != null && kb.BacklightPresent && kb.BacklightEnabled && kb.BacklightMode == 3 && kb.BacklightLevels > 1;
+                keyboardLevelLabel.Visible = keyboardLevel.Visible = keyboardLevelValue.Visible = manual;
+                if (manual)
+                {
+                    keyboardLevel.Maximum = kb.BacklightLevels - 1;
+                    keyboardLevel.Value = kb.BacklightLevel;
+                    keyboardLevelValue.Text = keyboardLevel.Value.ToString();
+                }
+
+                keyboardTopRow.Enabled = kb != null && kb.FnPresent;
+                keyboardTopRow.SelectedIndex = kb != null && kb.FnPresent ? (kb.FnMediaFirst ? 0 : 1) : -1;
+
+                int keyboardCount = kb != null && kb.Hosts.Count > 0 ? kb.Hosts.Count : 3;
+                for (int i = 0; i < 3; i++)
+                {
+                    keyboardRowLabels[i].Text = Lang.T("滑鼠 ", "Mouse ") + HostTitle(i) + "  →";
+                    ComboBox combo = keyboardRowTargets[i];
+                    combo.Items.Clear();
+                    int auto = AutoKeyboardChannel(i);
+                    combo.Items.Add(auto < 0 ? Lang.T("自動（鍵盤不切換）", "Auto (keyboard stays)") : Lang.T("自動：", "Auto: ") + KeyboardHostTitle(auto));
+                    for (int k = 0; k < keyboardCount; k++) combo.Items.Add(Lang.T("鍵盤 ", "Keyboard ") + KeyboardHostTitle(k));
+                    combo.Items.Add(Lang.T("鍵盤不切換", "Keyboard stays"));
+                    int chosen = keyboardChannels[i];
+                    combo.SelectedIndex = chosen == -2 ? 0 : chosen == -1 ? combo.Items.Count - 1 : Math.Min(chosen + 1, combo.Items.Count - 2);
+                    combo.Enabled = keyboardFollow.Checked;
+                }
+            }
+            finally { loadingKeyboard = false; }
+        }
+
         // Battery page: the level the mouse reports, the low-battery alert and its threshold
         // (also used by the haptics pause on the Haptics page).
         private void BuildBatteryPage(CardPanel page)
@@ -3018,6 +3412,7 @@ namespace MXMasterWin
             if (index == 2) ShowDevicePage();
             if (index == 3) ReadHapticStrength();
             if (index == 5) RefreshBattery();
+            if (index == 6) RefreshKeyboard(true);
             for (int i = 0; i < pages.Count; i++)
             {
                 pages[i].Visible = i == index;
@@ -3797,6 +4192,22 @@ namespace MXMasterWin
                         }
                         continue;
                     }
+                    if (key.Equals("KeyboardFollow", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool follow;
+                        if (bool.TryParse(parts[1].Trim(), out follow)) keyboardFollow.Checked = follow;
+                        continue;
+                    }
+                    if (key.Length == 16 && key.StartsWith("KeyboardChannel", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int mouseChannel, keyboardChannel;
+                        if (!int.TryParse(key.Substring(15), out mouseChannel) || mouseChannel < 1 || mouseChannel > 3) continue;
+                        string value = parts[1].Trim();
+                        if (value.Equals("Auto", StringComparison.OrdinalIgnoreCase)) keyboardChannels[mouseChannel - 1] = -2;
+                        else if (int.TryParse(value, out keyboardChannel) && keyboardChannel >= 0 && keyboardChannel <= 8)
+                            keyboardChannels[mouseChannel - 1] = keyboardChannel - 1;
+                        continue;
+                    }
                     if (key.Equals("EdgeDwell", StringComparison.OrdinalIgnoreCase))
                     {
                         int milliseconds;
@@ -3851,6 +4262,7 @@ namespace MXMasterWin
             UpdateHapticPauseNote();
             RefreshPrecisionTrigger();
             RefreshHostUi();
+            RefreshKeyboardUi();
         }
 
         private static readonly string[] GestureKeys = { "GestureUp", "GestureRight", "GestureDown", "GestureLeft" };
@@ -3898,6 +4310,10 @@ namespace MXMasterWin
                 lines.Add("EdgeDwell=" + edgeDwell.Value * 100);
                 lines.Add("EdgeKey=" + EdgeKeyNames[Math.Max(0, edgeKey.SelectedIndex)]);
                 lines.Add("EdgePlaceCursor=" + edgePlaceCursor.Checked);
+                lines.Add("KeyboardFollow=" + keyboardFollow.Checked);
+                // Per mouse channel: Auto, 0 = keyboard stays, or the keyboard channel number (1-3).
+                for (int i = 0; i < keyboardChannels.Length; i++)
+                    lines.Add("KeyboardChannel" + (i + 1) + "=" + (keyboardChannels[i] == -2 ? "Auto" : (keyboardChannels[i] + 1).ToString()));
                 lines.Add("Language=" + Lang.Setting);
                 // Ring0 is the top slice; the rest follow clockwise.
                 for (int i = 0; i < ringBindings.Length; i++)
@@ -4276,6 +4692,7 @@ namespace MXMasterWin
                         hosts = read;
                         currentHost = current;
                         RefreshHostUi();
+                        RefreshKeyboardUi();
                     }));
                 }
                 catch { }
@@ -4448,11 +4865,13 @@ namespace MXMasterWin
             precisionHeldBy = null;
             precisionRestorePending = normalDpi > 0;
             int haptic = flowHaptic.Checked && !HapticsPaused ? WaveId(flowHapticWave) : -1;
+            int keyboardTarget = keyboardFollow.Checked ? KeyboardChannelFor(host) : -1;
+            int keyboardFrom = keyboardSnapshot != null ? keyboardSnapshot.CurrentHost : -1;
             if (liveLog.Checked)
                 AddLog(DateTime.Now.ToString("HH:mm:ss.fff") + " Switch host -> " + host + " (" + reason + ")");
             ThreadPool.QueueUserWorkItem(delegate
             {
-                bool sent = false, restored = false;
+                bool sent = false, restored = false, keyboardSent = false;
                 // Leaving in precision mode would keep the slow speed on the other computer.
                 if (normalDpi > 0)
                 {
@@ -4468,11 +4887,20 @@ namespace MXMasterWin
                 }
                 try { sent = hidpp.ChangeHost(host, haptic); }
                 catch { }
+                // Only once the mouse has really left, so the keyboard never goes alone.
+                if (sent && keyboardTarget >= 0 && keyboardTarget != keyboardFrom)
+                {
+                    try { keyboardSent = keyboard.ChangeHost(keyboardTarget); }
+                    catch { }
+                }
                 try
                 {
                     if (!IsHandleCreated || IsDisposed) return;
                     BeginInvoke(new Action(delegate
                     {
+                        if (keyboardSent) SetKeyboardSnapshot(null);
+                        if (sent && liveLog.Checked && keyboardTarget >= 0 && keyboardTarget != keyboardFrom)
+                            AddLog(DateTime.Now.ToString("HH:mm:ss.fff") + " Keyboard switch host -> " + keyboardTarget + " sent=" + keyboardSent);
                         if (restored && restoreSeq == Thread.VolatileRead(ref precisionSeq))
                             precisionRestorePending = false;
                         if (liveLog.Checked)
@@ -4585,6 +5013,8 @@ namespace MXMasterWin
             diagnostics.Dispose();
             batteryTimer.Stop();
             hostCheck.Stop();
+            keyboardTimer.Stop();
+            keyboardLevelApply.Stop();
             Microsoft.Win32.SystemEvents.PowerModeChanged -= powerHandler;
             Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= displayHandler;
             if (appearanceSave.Enabled)
@@ -4604,6 +5034,7 @@ namespace MXMasterWin
                 }
             }
             hidpp.Dispose();
+            keyboard.Dispose();
             rawInput.Dispose();
             MouseHook.Uninstall();
             overlay.Close();
@@ -6452,7 +6883,8 @@ namespace MXMasterWin
             }
         }
 
-        private sealed class HidTransport : IDisposable
+        // Also used by KeyboardManager (FindKeyboardTransports), which opens its own handles.
+        internal sealed class HidTransport : IDisposable
         {
             private readonly FileStream stream;
             private readonly SafeFileHandle handle;
@@ -6474,6 +6906,18 @@ namespace MXMasterWin
             }
 
             public static List<HidTransport> FindMxMasterTransports(Action<string> report)
+            {
+                return FindTransports(report, false);
+            }
+
+            // Bolt receivers and Bluetooth Logitech devices other than the MX Master 4; the caller asks
+            // each one whether it is a keyboard.
+            public static List<HidTransport> FindKeyboardTransports(Action<string> report)
+            {
+                return FindTransports(report, true);
+            }
+
+            private static List<HidTransport> FindTransports(Action<string> report, bool keyboards)
             {
                 var transports = new List<HidTransport>();
                 Guid hidGuid;
@@ -6508,7 +6952,8 @@ namespace MXMasterWin
                             bool bolt = upper.Contains("VID_046D&PID_C548");
                             bool direct = upper.Contains("VID_046D&PID_B042") ||
                                 (upper.Contains("VID&02046D") && upper.Contains("PID&B042"));
-                            if (!bolt && !direct) continue;
+                            bool otherBluetooth = upper.Contains("VID&02046D") && !upper.Contains("PID&B042");
+                            if (keyboards ? !bolt && !otherBluetooth : !bolt && !direct) continue;
 
                             SafeFileHandle file = CreateFile(path, GenericRead | GenericWrite,
                                 FileShareRead | FileShareWrite, IntPtr.Zero, OpenExisting,
@@ -6525,7 +6970,7 @@ namespace MXMasterWin
                                 file.Dispose();
                                 continue;
                             }
-                            report((bolt ? "BOLT" : "BLE") + " HID++ interface usage=" +
+                            report((keyboards ? "keyboard search " : "") + (bolt ? "BOLT" : "BLE") + " HID++ interface usage=" +
                                 caps.UsagePage.ToString("X4") + ":" + caps.Usage.ToString("X4") +
                                 " in=" + caps.InputReportByteLength + " out=" + caps.OutputReportByteLength);
                             transports.Add(new HidTransport(path, file, caps, report));
@@ -6653,6 +7098,340 @@ namespace MXMasterWin
             uint creation, uint flags, IntPtr template);
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool CancelIoEx(SafeFileHandle handle, IntPtr overlapped);
+    }
+
+    // What the keyboard reported; null in MainForm means no keyboard is connected to this computer.
+    internal sealed class KeyboardSnapshot
+    {
+        public string Name = "";
+        public string Transport = "";        // "BLE" or "BOLT"
+        public int BatteryPercent = -1;
+        public bool Charging;
+        public string Firmware = "";
+        public List<HostEntry> Hosts = new List<HostEntry>();
+        public int CurrentHost = -1;
+        public bool BacklightPresent;
+        public bool BacklightEnabled;
+        public int BacklightMode;            // 1 automatic, 3 manual; other values are the keyboard's own
+        public int BacklightLevel;
+        public int BacklightLevels;          // manual brightness steps (0 .. levels-1)
+        public bool BacklightAuto;
+        public bool BacklightManual;
+        public bool FnPresent;
+        public bool FnMediaFirst = true;     // true: the top row sends media keys, hold Fn for F1-F12
+    }
+
+    // HID++ 2.0 with a Logitech keyboard (tested on an MX Mechanical Mini), on handles of its own so
+    // the mouse code is untouched. A Bolt receiver is shared with the mouse: Windows gives every open
+    // handle its own copy of the input reports, and replies are matched on device index and software
+    // ID. Feature numbers and byte layouts follow Solaar: 0x1814/0x1815 channels, 0x1982 backlight,
+    // 0x40A3 Fn inversion, 0x1004 battery, 0x0005 name and type. Typing reports are never read here:
+    // the keyboard's own collections cannot be opened, only the HID++ one.
+    internal sealed class KeyboardManager : IDisposable
+    {
+        private const byte SoftwareId = 0x0C;
+        private readonly object sync = new object();
+        private readonly Action<string> report;
+        private List<HidppDiversionManager.HidTransport> transports = new List<HidppDiversionManager.HidTransport>();
+        private HidppDiversionManager.HidTransport transport;
+        private int deviceIndex = -1;
+        private readonly Dictionary<int, int> features = new Dictionary<int, int>();
+        private volatile bool disposed;
+        private volatile bool connected;
+        private int lastSearch = unchecked(Environment.TickCount - 600000);
+
+        public KeyboardManager(Action<string> reportAction)
+        {
+            report = reportAction;
+        }
+
+        // Read without the lock so the UI thread never waits behind a search.
+        public bool Connected { get { return connected; } }
+
+        // Reads the keyboard, looking for one first when none is connected (at most every 8 seconds
+        // unless forced). Null when there is no keyboard on this computer.
+        public KeyboardSnapshot Refresh(bool force)
+        {
+            lock (sync)
+            {
+                if (disposed) return null;
+                try
+                {
+                    if (transport == null)
+                    {
+                        if (!force && unchecked(Environment.TickCount - lastSearch) < 8000) return null;
+                        Search(force);
+                        if (transport == null) return null;
+                    }
+                    KeyboardSnapshot snapshot = ReadSnapshot();
+                    if (snapshot == null) Drop("keyboard no longer answers");
+                    return snapshot;
+                }
+                catch (Exception ex)
+                {
+                    Drop("keyboard read failed: " + ex.Message);
+                    return null;
+                }
+            }
+        }
+
+        // Moves the keyboard to another channel. Like the mouse it leaves at once, so a request that
+        // went out counts as done.
+        public bool ChangeHost(int host)
+        {
+            lock (sync)
+            {
+                if (disposed) return false;
+                try
+                {
+                    if (transport == null) Search(false);
+                    if (transport == null) return false;
+                    byte[] info = Call(0x1814, 0);
+                    if (info == null)
+                    {
+                        Drop("keyboard no longer answers");
+                        return false;
+                    }
+                    if (host < 0 || host >= info[4] || host == info[5]) return false;
+                    Report("change host " + info[5] + " -> " + host);
+                    try { CallTimed(0x1814, 1, 300, (byte)host); }
+                    catch (Exception ex) { Report("change host: " + ex.Message); }
+                    Drop(null);
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    Drop("keyboard change host failed: " + ex.Message);
+                    return false;
+                }
+            }
+        }
+
+        // Backlight: off keeps the current mode; mode 1 automatic, 3 manual; the level is written only
+        // in manual mode. Write layout (Solaar): enabled, options, 0xFF, level, then the three delays
+        // (hands out, hands in, powered; two bytes each) written back as read. Confirmed by reading back.
+        public bool SetBacklight(bool enabled, int mode, int level)
+        {
+            lock (sync)
+            {
+                if (disposed || transport == null) return false;
+                try
+                {
+                    byte[] r = Call(0x1982, 0);
+                    if (r == null || r.Length < 16) return false;
+                    byte options = (byte)((r[5] & 0x07) | ((mode & 0x03) << 3));
+                    byte value = mode == 3 ? (byte)Math.Max(0, Math.Min(255, level)) : r[9];
+                    if (Call(0x1982, 1, (byte)(enabled ? 1 : 0), options, 0xFF, value, r[10], r[11], r[12], r[13], r[14], r[15]) == null) return false;
+                    byte[] check = Call(0x1982, 0);
+                    if (check == null || check.Length < 16 || (check[4] != 0) != enabled) return false;
+                    if (!enabled) return true;
+                    return ((check[5] >> 3) & 0x03) == mode && (mode != 3 || check[9] == value);
+                }
+                catch (Exception ex)
+                {
+                    Report("backlight write failed: " + ex.Message);
+                    return false;
+                }
+            }
+        }
+
+        // Top row: mediaFirst = true sends media keys by default. 0xFF means the channel of this computer
+        // (the keyboard keeps one setting per channel).
+        public bool SetFnMediaFirst(bool mediaFirst)
+        {
+            lock (sync)
+            {
+                if (disposed || transport == null) return false;
+                try
+                {
+                    if (Call(0x40A3, 1, 0xFF, (byte)(mediaFirst ? 1 : 0)) == null) return false;
+                    byte[] check = Call(0x40A3, 0, 0xFF);
+                    return check != null && (check[5] != 0) == mediaFirst;
+                }
+                catch (Exception ex)
+                {
+                    Report("Fn write failed: " + ex.Message);
+                    return false;
+                }
+            }
+        }
+
+        // Opens every candidate interface and asks each device whether it is a keyboard (0x0005
+        // function 2 reports 0 for a keyboard, 3 for a mouse). Bolt receivers are tried on slots 1-6.
+        private void Search(bool verbose)
+        {
+            lastSearch = Environment.TickCount;
+            Drop(null);
+            CloseTransports();
+            transports = HidppDiversionManager.HidTransport.FindKeyboardTransports(verbose ? (Action<string>)Report : delegate { });
+            foreach (HidppDiversionManager.HidTransport candidate in transports)
+            {
+                int[] slots = candidate.IsBolt ? new[] { 1, 2, 3, 4, 5, 6 } : new[] { 0xFF };
+                foreach (int slot in slots)
+                {
+                    transport = candidate;
+                    deviceIndex = slot;
+                    features.Clear();
+                    byte[] type = null;
+                    try
+                    {
+                        if (FindFeature(0x0005, 600) >= 0) type = CallTimed(0x0005, 2, 600);
+                    }
+                    catch { }
+                    if (type != null && type[4] == 0 && FindFeature(0x1814, 900) >= 0)
+                    {
+                        // Keep only the handle in use.
+                        foreach (HidppDiversionManager.HidTransport other in transports)
+                            if (other != candidate) other.Dispose();
+                        transports = new List<HidppDiversionManager.HidTransport> { candidate };
+                        connected = true;
+                        Report("keyboard found on " + candidate.Name + " dev=" + slot.ToString("X2"));
+                        return;
+                    }
+                }
+            }
+            transport = null;
+            deviceIndex = -1;
+            features.Clear();
+            CloseTransports();
+        }
+
+        private void Drop(string reason)
+        {
+            if (reason != null && transport != null) Report(reason);
+            transport = null;
+            deviceIndex = -1;
+            features.Clear();
+            connected = false;
+        }
+
+        private void CloseTransports()
+        {
+            foreach (HidppDiversionManager.HidTransport t in transports)
+            {
+                try { t.Dispose(); }
+                catch { }
+            }
+            transports = new List<HidppDiversionManager.HidTransport>();
+        }
+
+        private KeyboardSnapshot ReadSnapshot()
+        {
+            byte[] info = Call(0x1814, 0);
+            if (info == null) return null;
+            var s = new KeyboardSnapshot();
+            s.Transport = transport.Name;
+            s.CurrentHost = info[5];
+            for (int i = 0; i < Math.Min((int)info[4], 8); i++)
+            {
+                var entry = new HostEntry { Index = i };
+                byte[] host = Call(0x1815, 1, (byte)i);
+                if (host != null)
+                {
+                    entry.Paired = host[5] != 0;
+                    entry.Bus = host[6];
+                    entry.Name = ReadText(host[8], delegate(int offset) { return Call(0x1815, 3, (byte)i, (byte)offset); }, 6);
+                }
+                s.Hosts.Add(entry);
+            }
+            byte[] count = Call(0x0005, 0);
+            if (count != null) s.Name = ReadText(Math.Min((int)count[4], 64), delegate(int offset) { return Call(0x0005, 1, (byte)offset); }, 4);
+            byte[] battery = Call(0x1004, 1);
+            if (battery != null)
+            {
+                s.BatteryPercent = battery[4];
+                s.Charging = battery[6] == 1 || battery[6] == 2;
+            }
+            byte[] firmwareCount = Call(0x0003, 0);
+            if (firmwareCount != null)
+            {
+                for (int i = 0; i < Math.Min((int)firmwareCount[4], 8); i++)
+                {
+                    byte[] fw = Call(0x0003, 1, (byte)i);
+                    if (fw == null || fw.Length < 12 || (fw[4] & 0x0F) != 0) continue;
+                    string name = Encoding.ASCII.GetString(fw, 5, 3).Trim('\0', ' ');
+                    s.Firmware = name + " " + fw[8].ToString("X2") + "." + fw[9].ToString("X2") + ".B" + ((fw[10] << 8) | fw[11]).ToString("X4");
+                    break;
+                }
+            }
+            byte[] light = Call(0x1982, 0);
+            if (light != null && light.Length >= 16)
+            {
+                s.BacklightPresent = true;
+                s.BacklightEnabled = light[4] != 0;
+                s.BacklightMode = (light[5] >> 3) & 0x03;
+                s.BacklightAuto = (light[6] & 0x08) != 0;
+                s.BacklightManual = (light[6] & 0x20) != 0;
+                s.BacklightLevel = light[9];
+                byte[] levels = Call(0x1982, 2);
+                if (levels != null) s.BacklightLevels = levels[4];
+            }
+            byte[] fn = Call(0x40A3, 0, 0xFF);
+            if (fn != null)
+            {
+                s.FnPresent = true;
+                s.FnMediaFirst = fn[5] != 0;
+            }
+            Report("keyboard " + s.Name + " " + s.Transport + " battery=" + s.BatteryPercent + " fw=" + s.Firmware + " hosts current=" + s.CurrentHost +
+                String.Concat(s.Hosts.ConvertAll(delegate(HostEntry h) { return " " + h.Index + ":" + (h.Name.Length == 0 ? "-" : h.Name) + "/" + h.Bus; }).ToArray()));
+            return s;
+        }
+
+        // Reads a string that the device hands out in pieces starting at byte `start` of each reply.
+        private static string ReadText(int length, Func<int, byte[]> piece, int start)
+        {
+            var bytes = new List<byte>();
+            while (bytes.Count < length)
+            {
+                byte[] reply = piece(bytes.Count);
+                if (reply == null) break;
+                int take = Math.Min(length - bytes.Count, reply.Length - start);
+                if (take <= 0) break;
+                for (int k = 0; k < take; k++) bytes.Add(reply[start + k]);
+            }
+            return Encoding.UTF8.GetString(bytes.ToArray()).Trim('\0');
+        }
+
+        private int FindFeature(int feature, int timeout)
+        {
+            int cached;
+            if (features.TryGetValue(feature, out cached)) return cached;
+            byte[] root = transport.Request(deviceIndex, 0, 0, SoftwareId, new byte[] { (byte)(feature >> 8), (byte)(feature & 0xFF), 0 }, timeout);
+            if (root == null) return -1;      // no answer: ask again next time
+            int index = root[4] == 0 ? -1 : root[4];
+            features[feature] = index;
+            return index;
+        }
+
+        private byte[] Call(int feature, int function, params byte[] parameters)
+        {
+            return CallTimed(feature, function, 900, parameters);
+        }
+
+        private byte[] CallTimed(int feature, int function, int timeout, params byte[] parameters)
+        {
+            if (transport == null) return null;
+            int index = FindFeature(feature, 1800);
+            if (index < 0) return null;
+            byte[] reply = transport.Request(deviceIndex, index, function, SoftwareId, parameters, timeout);
+            return reply != null && reply.Length >= 12 ? reply : null;
+        }
+
+        private void Report(string text)
+        {
+            try { report(text); }
+            catch { }
+        }
+
+        public void Dispose()
+        {
+            disposed = true;
+            lock (sync)
+            {
+                Drop(null);
+                CloseTransports();
+            }
+        }
     }
 
     internal sealed class DeviceSnapshot
