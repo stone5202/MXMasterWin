@@ -1889,7 +1889,24 @@ namespace MXMasterWin
                         g.DrawPath(outline, body);
                         g.FillRectangle(ink, x + bodyWidth + 1F * scale, middle - 2.5F * scale, 2F * scale, 5F * scale);
                     }
-                    x += bodyWidth + 12F * scale;
+                    x += bodyWidth + 3F * scale;
+                    if (charging)
+                    {
+                        // 充電中：電池右邊畫一個小閃電（不寫文字，免得超出框框）。
+                        float w = 7F * scale, h = 12F * scale, bx = x + 3F * scale, by = middle - h / 2F;
+                        var bolt = new PointF[]
+                        {
+                            new PointF(bx + w * 0.62F, by),
+                            new PointF(bx, by + h * 0.58F),
+                            new PointF(bx + w * 0.45F, by + h * 0.58F),
+                            new PointF(bx + w * 0.34F, by + h),
+                            new PointF(bx + w, by + h * 0.40F),
+                            new PointF(bx + w * 0.55F, by + h * 0.40F)
+                        };
+                        g.FillPolygon(ink, bolt);
+                        x += w + 3F * scale;
+                    }
+                    x += 9F * scale;
                 }
             }
             else
@@ -1900,12 +1917,15 @@ namespace MXMasterWin
                 x += dot + 8F * scale;
             }
 
-            string text = connection + (charging ? Lang.T("・充電中", " · charging") : "");
+            // 充電狀態改由電池旁的閃電表示；沒有電量時（percentValue < 0）仍用文字。
+            string text = connection + (charging && percentValue < 0 ? Lang.T("・充電中", " · charging") : "");
             using (var font = new Font(Theme.UiFont, 9F))
             using (var muted = new SolidBrush(Theme.Muted))
+            using (var format = new StringFormat(StringFormatFlags.NoWrap) { Trimming = StringTrimming.EllipsisCharacter, LineAlignment = StringAlignment.Center })
             {
-                SizeF size = g.MeasureString(text, font);
-                g.DrawString(text, font, muted, x, middle - size.Height / 2F);
+                // 超出框框時以省略號截斷。
+                var area = new RectangleF(x, middle - 10F * scale, Math.Max(0F, Width - x - 8F * scale), 20F * scale);
+                g.DrawString(text, font, muted, area, format);
             }
         }
     }
