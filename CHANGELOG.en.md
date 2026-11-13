@@ -4,6 +4,12 @@
   <a href="CHANGELOG.md">繁體中文</a> · <strong>English</strong>
 </p>
 
+## 2.3 — 2026-11-13
+
+- New Keyboard page (between Battery and Advanced) for a Logitech keyboard, connected over Bluetooth or sharing the Logi Bolt receiver with the mouse. It shows connection, battery and firmware, and sets the backlight (automatic, manual brightness or off) and whether the top row sends media keys or F1–F12. Settings live on the keyboard and count as applied once it confirms them.
+- The keyboard follows the mouse: when the mouse moves to another computer (MX Flow, a Switch-to-channel action or the Switch button), the keyboard moves to the matching channel, only after the mouse switch went out. Each mouse channel can pick a keyboard channel; Automatic uses the channel with the same computer name, otherwise the same number, and a channel can also leave the keyboard where it is. Set on the Keyboard page.
+- While a keyboard is connected, the battery chip in the bottom-left corner gets a second row with the keyboard's level.
+
 ## 2.2.1 — 2026-10-23
 
 - Fix: quitting right after leaving precision mode could leave the mouse at the precision speed until the next start or reconnect.
