@@ -60,7 +60,7 @@ namespace MXMasterWin
             }
         }
 
-        internal const string Version = "2.3.1";
+        internal const string Version = "2.4";
 
         // Set before closing the main window to start the app again (used after a language change).
         internal static bool RestartRequested;
@@ -1375,6 +1375,115 @@ namespace MXMasterWin
     }
 
     // A CheckBox drawn as a label with an on/off switch at its right edge.
+    // A row of segments (like a macOS segmented control) for the Keyboard page's sub-pages; matches the
+    // rounded card style instead of the system TabControl.
+    internal sealed class SegmentedTabs : Control
+    {
+        private readonly float scale = Theme.GetScale();
+        private readonly string[] items;
+        private readonly Font regular = new Font(Theme.UiFont, 9.5F);
+        private readonly Font bold = new Font(Theme.UiFont, 9.5F, FontStyle.Bold);
+        private int selected;
+        private int hover = -1;
+        public event EventHandler SelectedIndexChanged;
+
+        public SegmentedTabs(string[] items)
+        {
+            this.items = items;
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            Cursor = Cursors.Hand;
+        }
+
+        public int SelectedIndex
+        {
+            get { return selected; }
+            set
+            {
+                if (value < 0 || value >= items.Length || value == selected) return;
+                selected = value;
+                Invalidate();
+                if (SelectedIndexChanged != null) SelectedIndexChanged(this, EventArgs.Empty);
+            }
+        }
+
+        private RectangleF Segment(int index)
+        {
+            float pad = 3F * scale;
+            float width = (Width - pad * 2F) / items.Length;
+            return new RectangleF(pad + index * width, pad, width, Height - pad * 2F);
+        }
+
+        private int HitTest(Point point)
+        {
+            for (int i = 0; i < items.Length; i++)
+                if (Segment(i).Contains(point)) return i;
+            return -1;
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            int index = HitTest(e.Location);
+            if (index != hover) { hover = index; Invalidate(); }
+            base.OnMouseMove(e);
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            hover = -1;
+            Invalidate();
+            base.OnMouseLeave(e);
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left)
+            {
+                int index = HitTest(e.Location);
+                if (index >= 0) SelectedIndex = index;
+            }
+            base.OnMouseDown(e);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            Color back = Parent != null ? Parent.BackColor : Theme.Card;
+            g.Clear(back);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (GraphicsPath path = Theme.RoundedRectangle(new RectangleF(0.5F, 0.5F, Width - 1F, Height - 1F), 9F * scale))
+            using (var fill = new SolidBrush(Theme.Page))
+                g.FillPath(fill, path);
+            for (int i = 0; i < items.Length; i++)
+            {
+                RectangleF r = Segment(i);
+                Color ink = Theme.Muted;
+                if (i == selected)
+                {
+                    using (GraphicsPath pill = Theme.RoundedRectangle(r, 7F * scale))
+                    using (var card = new SolidBrush(Theme.Card))
+                    using (var border = new Pen(Theme.CardBorder))
+                    {
+                        g.FillPath(card, pill);
+                        g.DrawPath(border, pill);
+                    }
+                    ink = Theme.Text;
+                }
+                else if (i == hover) ink = Theme.Text;
+                Color under = i == selected ? Theme.Card : Theme.Page;
+                TextRenderer.DrawText(g, items[i], i == selected ? bold : regular, Rectangle.Round(r), ink, under,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine |
+                    TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+            }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) { regular.Dispose(); bold.Dispose(); }
+            base.Dispose(disposing);
+        }
+    }
+
     internal sealed class ToggleSwitch : CheckBox
     {
         private readonly float scale = Theme.GetScale();
@@ -2059,6 +2168,18 @@ namespace MXMasterWin
         private readonly HidppDiversionManager hidpp;
         // Keyboard page: a Logitech keyboard's status, backlight and top row, and following the mouse.
         private readonly KeyboardManager keyboard;
+        private readonly BoltReceiver bolt;
+        private BoltReceiverSnapshot receiverSnapshot = new BoltReceiverSnapshot();
+        private int demoReceiver;
+        private readonly Label receiverTitle = new Label();
+        private readonly Label receiverCount = new Label();
+        private readonly Label receiverMessage = new Label();
+        private readonly Label[] receiverRows = new Label[6];
+        private Panel receiverPaired;
+        private readonly Button[] receiverUnpair = new Button[6];
+        private readonly Label pairingStatus = new Label();
+        private readonly Label pairingCode = new Label();
+        private Button pairingStart, pairingCancel;
         private KeyboardSnapshot keyboardSnapshot;
         private int keyboardBusy;
         private readonly System.Windows.Forms.Timer keyboardTimer = new System.Windows.Forms.Timer();
@@ -2071,6 +2192,18 @@ namespace MXMasterWin
         private readonly Label keyboardConnection = new Label();
         private readonly Label keyboardBattery = new Label();
         private readonly Label keyboardFirmware = new Label();
+        private readonly Panel keyboardLightGroup = new Panel(), keyboardFnGroup = new Panel(), keyboardOsGroup = new Panel();
+        private readonly ComboBox keyboardPlatform = new ComboBox();
+        private readonly CheckBox[] keyboardDisabled = new CheckBox[8];
+        private readonly NumericUpDown[] keyboardDelays = new NumericUpDown[3];
+        private readonly Panel keyboardLevelRow = new Panel();
+        private readonly Panel[] keyboardTabPages = new Panel[4];
+        private readonly Label[] keyboardEmpty = new Label[4];
+        private Label keyboardDelayNote, keyboardDisableHint;
+        // What RefreshKeyboardUi wants shown (Control.Visible reads false while the sub-page is hidden).
+        private readonly Dictionary<Control, bool> keyboardWanted = new Dictionary<Control, bool>();
+        private readonly Dictionary<Control, Panel> keyboardRowDividers = new Dictionary<Control, Panel>();
+        private readonly Panel[] keyboardDelayRows = new Panel[3];
         private readonly ComboBox keyboardBacklight = new ComboBox();
         private readonly List<int> keyboardBacklightChoices = new List<int>();   // -1 off, 1 automatic, 3 manual, other = keyboard's own
         private readonly Label keyboardLevelLabel = new Label();
@@ -2228,6 +2361,11 @@ namespace MXMasterWin
             rawInput = new RawInputMonitor(this.Handle, AppendRawEvent, OnVendorButton, OnMouseActivity, OnMxMouseMove, OnBoltShortReport);
             hidpp = new HidppDiversionManager(OnHidppStatus, OnHidppReady);
             keyboard = new KeyboardManager(OnKeyboardReport);
+            bolt = new BoltReceiver(OnBoltReport);
+            bolt.Changed += OnBoltChanged;
+            foreach (string argument in Environment.GetCommandLineArgs())
+                if (argument.StartsWith("--demo-receiver=", StringComparison.OrdinalIgnoreCase))
+                    Int32.TryParse(argument.Substring(16), out demoReceiver);
             MouseHook.MouseEvent += OnMouseEvent;
             MouseHook.Install();
 
@@ -2474,7 +2612,8 @@ namespace MXMasterWin
             AddNavigation("MX Flow", "", 4);
             AddNavigation(Lang.T("電池", "Battery"), "\uE83F", 5);   // Battery10
             AddNavigation(Lang.T("鍵盤", "Keyboard"), "\uE765", 6);   // KeyboardClassic
-            AddNavigation(Lang.T("進階", "Advanced"), "", 7);
+            AddNavigation(Lang.T("接收器", "Receiver"), "\uE88E", 7);   // USB
+            AddNavigation(Lang.T("進階", "Advanced"), "", 8);
 
             chip.Location = new Point(S(24), S(566));
             chip.Size = new Size(S(202), S(36));
@@ -2726,7 +2865,10 @@ namespace MXMasterWin
             // ---- Page 6: keyboard ----
             BuildKeyboardPage(AddPage(Lang.T("鍵盤", "Keyboard")));
 
-            // ---- Page 7: everything else ----
+            // ---- Page 7: Logi Bolt receiver ----
+            BuildReceiverPage(AddPage(Lang.T("接收器", "Receiver")));
+
+            // ---- Page 8: everything else ----
             CardPanel advancedPage = AddPage(Lang.T("進階", "Advanced"));
             enableSwitch.Text = Lang.T("啟用按鍵對應", "Enable button mapping");
             enableSwitch.Checked = true;
@@ -2853,8 +2995,9 @@ namespace MXMasterWin
             {
                 Text = text,
                 Glyph = glyph,
-                Location = new Point(S(24), S(100) + index * S(52)),
-                Size = new Size(S(202), S(44))
+                // Nine pages: a little denser than before (like the macOS sidebar) so the battery chip still fits below.
+                Location = new Point(S(24), S(100) + index * S(46)),
+                Size = new Size(S(202), S(42))
             };
             item.Click += delegate { ShowPage(index); };
             navigation.Add(item);
@@ -2986,133 +3129,555 @@ namespace MXMasterWin
         // backlight, top row, and which keyboard channel goes with each mouse channel.
         private void BuildKeyboardPage(CardPanel page)
         {
-            int right = 748;
-            keyboardName.AutoSize = false;
-            keyboardName.AutoEllipsis = true;
-            keyboardName.UseMnemonic = false;
-            keyboardName.TextAlign = ContentAlignment.MiddleLeft;
+            keyboardName.AutoSize = false; keyboardName.AutoEllipsis = true; keyboardName.UseMnemonic = false;
             keyboardName.Font = keyboardNameFont;
-            keyboardName.Location = new Point(S(18), S(56));
-            // Up to the Reload button, so the not-found explanation fits on one line.
-            keyboardName.Size = new Size(S(right - 110 - 12 - 18), S(24));
+            keyboardName.Bounds = new Rectangle(S(18), S(54), S(608), S(26));
             page.Controls.Add(keyboardName);
             Button reload = Theme.CreateButton(Lang.T("重新讀取", "Reload"), false);
-            reload.Size = new Size(S(110), S(30));
-            reload.Location = new Point(S(right - 110), S(52));
-            reload.Click += delegate { RefreshKeyboard(true); };
-            page.Controls.Add(reload);
-
-            // The same three facts as the top of the Mac's pointer page: connection, battery, firmware.
+            reload.Bounds = new Rectangle(S(638), S(52), S(110), S(30));
+            reload.Click += delegate { RefreshKeyboard(true); }; page.Controls.Add(reload);
             string[] titles = { Lang.T("連線", "Connection"), Lang.T("電量", "Battery"), Lang.T("韌體", "Firmware") };
             Label[] values = { keyboardConnection, keyboardBattery, keyboardFirmware };
             for (int i = 0; i < 3; i++)
             {
                 int x = 18 + i * 250;
-                page.Controls.Add(new Label { Text = titles[i], AutoSize = true, ForeColor = Theme.Muted, Font = new Font(Theme.UiFont, 8.5F), Location = new Point(S(x), S(88)) });
-                values[i].AutoSize = false;
-                values[i].AutoEllipsis = true;
-                values[i].UseMnemonic = false;
+                page.Controls.Add(new Label { Text = titles[i], AutoSize = false, ForeColor = Theme.Muted,
+                    Bounds = new Rectangle(S(x), S(88), S(230), S(18)) });
+                values[i].AutoSize = false; values[i].AutoEllipsis = true; values[i].UseMnemonic = false;
                 values[i].Font = new Font(Theme.UiFont, 11F, FontStyle.Bold);
-                values[i].Location = new Point(S(x), S(106));
-                values[i].Size = new Size(S(230), S(26));
-                values[i].Text = "—";
+                values[i].Bounds = new Rectangle(S(x), S(108), S(230), S(26)); values[i].Text = "—";
                 page.Controls.Add(values[i]);
             }
-            AddDivider(page, 140, S(right - 18));
+            // Sub-pages: a segmented control and, under it, one content panel per segment. Rows follow the
+            // other pages' style (title and a muted hint on the left, the control right-aligned, dividers between
+            // rows) and are stacked by LayoutKeyboardTabs so rows the keyboard does not support leave no gaps.
+            // Content runs from page y=188 to 450 (page height 458), also at 150% scaling.
+            string[] tabNames = { Lang.T("設定", "Settings"), Lang.T("背光延遲", "Backlight delays"),
+                Lang.T("停用按鍵", "Disable keys"), Lang.T("一起切換", "Switch together") };
+            var tabs = new SegmentedTabs(tabNames) { Bounds = new Rectangle(S(18), S(146), S(730), S(34)) };
+            page.Controls.Add(tabs);
+            for (int i = 0; i < 4; i++)
+            {
+                keyboardTabPages[i] = new Panel { Bounds = new Rectangle(S(10), S(188), S(746), S(262)), BackColor = Theme.Card, Visible = i == 0 };
+                page.Controls.Add(keyboardTabPages[i]);
+                keyboardEmpty[i] = new Label { AutoSize = false, ForeColor = Theme.Muted, UseMnemonic = false,
+                    Bounds = new Rectangle(S(8), S(14), S(730), S(44)), Visible = false };
+                keyboardTabPages[i].Controls.Add(keyboardEmpty[i]);
+            }
+            tabs.SelectedIndexChanged += delegate
+            {
+                for (int i = 0; i < 4; i++) keyboardTabPages[i].Visible = i == tabs.SelectedIndex;
+            };
+            Panel settings = keyboardTabPages[0], delays = keyboardTabPages[1], disable = keyboardTabPages[2], follow = keyboardTabPages[3];
+            const int left = 8, right = 738;   // inside the content panels (page x 18 to 748)
 
-            page.Controls.Add(new Label { Text = Lang.T("背光", "Backlight"), AutoSize = true, Location = new Point(S(18), S(152)) });
-            AddHint(page, Lang.T("自動：手靠近時亮起、亮度跟著環境光；手動：固定亮度", "Auto: lights up as your hands approach and follows ambient light; Manual: fixed"), 176);
+            // Settings: backlight (with brightness while manual), top row, OS layout.
+            KeyboardRow(settings, keyboardLightGroup, Lang.T("背光", "Backlight"),
+                Lang.T("自動：手靠近時亮起、亮度跟著環境光；手動：固定亮度", "Auto lights up as your hands approach and follows ambient light; Manual is fixed"), 64);
             keyboardBacklight.DropDownStyle = ComboBoxStyle.DropDownList;
-            keyboardBacklight.Width = S(160);
-            keyboardBacklight.Location = new Point(S(right - 160), S(156));
+            keyboardBacklight.Bounds = new Rectangle(S(right - 200), S(19), S(200), S(26));
             keyboardBacklight.SelectionChangeCommitted += delegate { ApplyKeyboardBacklight(); };
-            page.Controls.Add(keyboardBacklight);
-            keyboardLevelLabel.Text = Lang.T("亮度", "Brightness");
-            keyboardLevelLabel.AutoSize = false;
-            keyboardLevelLabel.Location = new Point(S(18), S(203));
-            keyboardLevelLabel.Size = new Size(S(84), S(22));
-            page.Controls.Add(keyboardLevelLabel);
-            keyboardLevel.Minimum = 0;
-            keyboardLevel.Maximum = 7;
-            keyboardLevel.Location = new Point(S(104), S(200));
-            keyboardLevel.Size = new Size(S(300), S(26));
-            keyboardLevelValue.AutoSize = false;
-            keyboardLevelValue.TextAlign = ContentAlignment.MiddleRight;
-            keyboardLevelValue.Location = new Point(S(410), S(201));
-            keyboardLevelValue.Size = new Size(S(40), S(22));
-            // A drag reports every step; write once it settles.
+            keyboardLightGroup.Controls.Add(keyboardBacklight);
+
+            keyboardLevelRow.Bounds = new Rectangle(0, 0, S(746), S(44)); keyboardLevelRow.BackColor = Theme.Card;
+            settings.Controls.Add(keyboardLevelRow);
+            keyboardLevelLabel.Text = Lang.T("亮度", "Brightness"); keyboardLevelLabel.AutoSize = false;
+            keyboardLevelLabel.Bounds = new Rectangle(S(left + 16), S(10), S(120), S(24));
+            keyboardLevel.Minimum = 0; keyboardLevel.Maximum = 7;
+            keyboardLevel.Bounds = new Rectangle(S(right - 200), S(8), S(160), S(26));
+            keyboardLevelValue.AutoSize = false; keyboardLevelValue.TextAlign = ContentAlignment.MiddleRight;
+            keyboardLevelValue.Bounds = new Rectangle(S(right - 36), S(10), S(36), S(24));
+            keyboardLevelRow.Controls.Add(keyboardLevelLabel); keyboardLevelRow.Controls.Add(keyboardLevel); keyboardLevelRow.Controls.Add(keyboardLevelValue);
+            AddKeyboardDivider(keyboardLevelRow, 44);
             keyboardLevelApply.Interval = 400;
             keyboardLevelApply.Tick += delegate
             {
-                keyboardLevelApply.Stop();
-                int level = keyboardLevel.Value;
-                if (keyboardSnapshot == null || level == keyboardSnapshot.BacklightLevel) return;
+                keyboardLevelApply.Stop(); int level = keyboardLevel.Value;
+                if (keyboardSnapshot == null || keyboardSnapshot.Asleep || level == keyboardSnapshot.BacklightLevel) return;
                 WriteKeyboard(Lang.T("背光亮度", "Backlight brightness"), delegate { return keyboard.SetBacklight(true, 3, level); });
             };
             keyboardLevel.ValueChanged += delegate
             {
                 keyboardLevelValue.Text = keyboardLevel.Value.ToString();
-                if (loadingKeyboard) return;
-                keyboardLevelApply.Stop();
-                keyboardLevelApply.Start();
+                if (loadingKeyboard) return; keyboardLevelApply.Stop(); keyboardLevelApply.Start();
             };
-            page.Controls.Add(keyboardLevel);
-            page.Controls.Add(keyboardLevelValue);
-            AddDivider(page, 232, S(right - 18));
 
-            page.Controls.Add(new Label { Text = Lang.T("最上排按鍵預設", "Top row by default"), AutoSize = true, Location = new Point(S(18), S(244)) });
-            AddHint(page, Lang.T("另一種功能要按住 Fn；每個 Easy-Switch 頻道各自記錄，這裡改的是這台電腦", "Hold Fn for the other function. Kept per Easy-Switch channel; this changes this computer's"), 268);
+            KeyboardRow(settings, keyboardFnGroup, Lang.T("最上排按鍵預設", "Top row by default"),
+                Lang.T("另一種功能要按住 Fn；每個 Easy-Switch 頻道各自記錄", "Hold Fn for the other one; kept per Easy-Switch channel"), 64);
             keyboardTopRow.DropDownStyle = ComboBoxStyle.DropDownList;
-            keyboardTopRow.Items.Add(Lang.T("媒體鍵", "Media keys"));
-            keyboardTopRow.Items.Add("F1–F12");
-            keyboardTopRow.Width = S(160);
-            keyboardTopRow.Location = new Point(S(right - 160), S(248));
+            keyboardTopRow.Items.Add(Lang.T("媒體鍵", "Media keys")); keyboardTopRow.Items.Add("F1–F12");
+            keyboardTopRow.Bounds = new Rectangle(S(right - 200), S(19), S(200), S(26)); keyboardFnGroup.Controls.Add(keyboardTopRow);
             keyboardTopRow.SelectionChangeCommitted += delegate
             {
                 bool media = keyboardTopRow.SelectedIndex == 0;
                 WriteKeyboard(Lang.T("F 鍵", "F-keys"), delegate { return keyboard.SetFnMediaFirst(media); });
             };
-            page.Controls.Add(keyboardTopRow);
-            AddDivider(page, 296, S(right - 18));
 
-            keyboardFollow.Text = Lang.T("滑鼠切換電腦時鍵盤一起切換（MX Flow、「切換到頻道」與「切換過去」）", "Switch the keyboard with the mouse (MX Flow, Switch-to-channel, Switch)");
-            keyboardFollow.Checked = true;
-            keyboardFollow.Location = new Point(S(18), S(306));
-            keyboardFollow.Size = new Size(S(right - 18), S(26));
+            KeyboardRow(settings, keyboardOsGroup, Lang.T("作業系統配置", "OS layout"),
+                Lang.T("按鍵依哪個系統配置；只變更目前 Easy-Switch 頻道", "Which system the keys are laid out for; current Easy-Switch channel only"), 64);
+            keyboardPlatform.DropDownStyle = ComboBoxStyle.DropDownList; keyboardPlatform.Bounds = new Rectangle(S(right - 200), S(19), S(200), S(26));
+            keyboardOsGroup.Controls.Add(keyboardPlatform);
+            keyboardPlatform.SelectionChangeCommitted += delegate
+            {
+                SolaarFeatures.Platform selected = keyboardPlatform.SelectedItem as SolaarFeatures.Platform;
+                if (selected != null) { int value = selected.Id; WriteKeyboard(Lang.T("作業系統配置", "OS layout"), delegate { return keyboard.SetPlatform(value); }); }
+            };
+
+            // Backlight delays: one row each, number + unit + Apply on one line.
+            string[] delayNames = { Lang.T("手離開", "Hands away"), Lang.T("手靠近", "Hands near"), Lang.T("接電源", "External power") };
+            string[] delayHints = { Lang.T("手離開鍵盤後，背光多久後熄滅", "How long the backlight stays on after your hands leave"),
+                Lang.T("手放在鍵盤附近時，背光多久後熄滅", "How long it stays on while your hands are near"),
+                Lang.T("接上電源時，背光多久後熄滅", "How long it stays on while on external power") };
+            for (int i = 0; i < 3; i++)
+            {
+                int field = i;
+                Panel row = new Panel();
+                keyboardDelayRows[i] = row;
+                KeyboardRow(delays, row, delayNames[i], delayHints[i], 62);
+                Button apply = Theme.CreateButton(Lang.T("套用", "Apply"), false);
+                apply.Bounds = new Rectangle(S(right - 84), S(16), S(84), S(30)); row.Controls.Add(apply);
+                row.Controls.Add(new Label { Text = Lang.T("秒", "s"), AutoSize = false, TextAlign = ContentAlignment.MiddleLeft,
+                    Bounds = new Rectangle(S(right - 84 - 40), S(18), S(34), S(26)) });
+                NumericUpDown seconds = new NumericUpDown { Minimum = 1, Maximum = 600, TextAlign = HorizontalAlignment.Right,
+                    Bounds = new Rectangle(S(right - 84 - 40 - 88), S(18), S(84), S(26)) };
+                keyboardDelays[i] = seconds; row.Controls.Add(seconds);
+                apply.Click += delegate { int value = (int)seconds.Value; WriteKeyboard(delayNames[field], delegate { return keyboard.SetBacklightDelay(field, value); }); };
+            }
+            keyboardDelayNote = new Label { Text = Lang.T("1–600 秒，以 5 秒為單位（向上取整）；按「套用」才會寫入鍵盤。",
+                "1–600 seconds in 5-second steps (rounded up); Apply writes it to the keyboard."),
+                AutoSize = false, ForeColor = Theme.Muted, Font = new Font(Theme.UiFont, 8.5F), Bounds = new Rectangle(S(left), 0, S(730), S(36)) };
+            delays.Controls.Add(keyboardDelayNote);
+
+            // Disable keys: switches in two columns, only the keys this keyboard can disable.
+            keyboardDisableHint = new Label { Text = Lang.T("打開開關就停用那個鍵；只列出這把鍵盤允許停用的鍵。",
+                "Turn a switch on to disable that key; only keys this keyboard can disable are listed."),
+                AutoSize = false, ForeColor = Theme.Muted, Font = new Font(Theme.UiFont, 8.5F), Bounds = new Rectangle(S(left), S(10), S(730), S(22)) };
+            disable.Controls.Add(keyboardDisableHint);
+            for (int i = 0; i < 8; i++)
+            {
+                int bit = i;
+                string name = i == 4 ? Lang.T("Windows 鍵", "Windows key") : SolaarFeatures.DisableName(i);
+                CheckBox key = new ToggleSwitch { Text = name, Size = new Size(S(345), S(30)) };
+                key.Click += delegate { bool value = key.Checked; WriteKeyboard(name, delegate { return keyboard.SetDisabledKey(bit, value); }); };
+                keyboardDisabled[i] = key; disable.Controls.Add(key);
+            }
+
+            // Switch together: the switch, then which keyboard channel each mouse channel takes.
+            Panel followRow = new Panel();
+            KeyboardRow(follow, followRow, "", Lang.T("MX Flow、「切換到頻道」動作與「切換過去」按鈕都會帶著鍵盤",
+                "MX Flow, the Switch-to-channel action and the Switch button all take the keyboard along"), 64);
+            keyboardFollow.Text = Lang.T("滑鼠切換電腦時鍵盤一起切換", "Switch the keyboard with the mouse");
+            keyboardFollow.Checked = true; keyboardFollow.Bounds = new Rectangle(S(left), S(6), S(right - left), S(28));
             keyboardFollow.CheckedChanged += delegate
             {
-                if (loadingKeyboard) return;
-                RefreshKeyboardUi();
-                SaveSettings();
+                if (!keyboardFollow.Checked) keyboard.CancelPendingSwitch();
+                if (loadingKeyboard) return; RefreshKeyboardUi(); SaveSettings();
             };
-            page.Controls.Add(keyboardFollow);
+            followRow.Controls.Add(keyboardFollow);
             for (int i = 0; i < 3; i++)
             {
                 int mouseChannel = i;
-                keyboardRowLabels[i] = new Label
+                keyboardRowLabels[i] = new Label { AutoEllipsis = true, UseMnemonic = false, AutoSize = false, TextAlign = ContentAlignment.MiddleLeft,
+                    Bounds = new Rectangle(S(left), S(76 + i * 40), S(360), S(26)) };
+                follow.Controls.Add(keyboardRowLabels[i]);
+                ComboBox combo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList,
+                    Bounds = new Rectangle(S(right - 330), S(76 + i * 40), S(330), S(26)) };
+                combo.SelectionChangeCommitted += delegate
+                {
+                    int selected = combo.SelectedIndex;
+                    keyboardChannels[mouseChannel] = selected <= 0 ? -2 : selected == combo.Items.Count - 1 ? -1 : selected - 1;
+                    SaveSettings();
+                };
+                keyboardRowTargets[i] = combo; follow.Controls.Add(combo);
+            }
+            follow.Controls.Add(new Label { Text = Lang.T("自動＝同名電腦的頻道，否則同一個頻道號。經 Logi Bolt 配對的頻道在鍵盤上常記成「Logitech Bolt receiver」，對不上時請手動指定。",
+                "Auto picks the channel with the same computer name, else the same number. Channels paired through Logi Bolt often read \"Logitech Bolt receiver\" on the keyboard; pick one by hand if they do not match."),
+                AutoSize = false, ForeColor = Theme.Muted, Font = new Font(Theme.UiFont, 8.5F), Bounds = new Rectangle(S(left), S(202), S(730), S(44)) });
+            RefreshKeyboardUi();
+        }
+
+        // One Keyboard sub-page row: title and muted hint on the left (title empty when a control such as a
+        // switch carries it), a divider at the bottom; the caller adds the right-hand control.
+        private void KeyboardRow(Panel parent, Panel row, string title, string hint, int height)
+        {
+            row.Bounds = new Rectangle(0, 0, S(746), S(height));
+            row.BackColor = Theme.Card;
+            parent.Controls.Add(row);
+            if (title.Length > 0)
+                row.Controls.Add(new Label { Text = title, AutoSize = false, UseMnemonic = false, Bounds = new Rectangle(S(8), S(10), S(500), S(24)) });
+            row.Controls.Add(new Label { Text = hint, AutoSize = false, AutoEllipsis = true, UseMnemonic = false, ForeColor = Theme.Muted,
+                Font = new Font(Theme.UiFont, 8.5F), Bounds = new Rectangle(S(8), S(36), S(510), S(20)) });
+            AddKeyboardDivider(row, height);
+        }
+
+        private void AddKeyboardDivider(Panel row, int height)
+        {
+            var line = new Panel { BackColor = Theme.Divider, Bounds = new Rectangle(S(8), S(height) - 1, S(730), 1) };
+            row.Controls.Add(line);
+            keyboardRowDividers[row] = line;
+        }
+
+        private void WantKeyboard(Control control, bool show)
+        {
+            control.Visible = show;
+            keyboardWanted[control] = show;
+        }
+
+        private bool KeyboardWanted(Control control)
+        {
+            bool show;
+            return keyboardWanted.TryGetValue(control, out show) && show;
+        }
+
+        // Stacks the wanted rows from the top (no gaps for unsupported rows); the last one drops its divider.
+        private int StackKeyboardRows(Control[] rows)
+        {
+            int y = 0;
+            Control last = null;
+            foreach (Control row in rows)
+            {
+                Panel line;
+                if (keyboardRowDividers.TryGetValue(row, out line)) line.Visible = true;
+                if (!KeyboardWanted(row)) continue;
+                row.Top = y;
+                y += row.Height;
+                last = row;
+            }
+            Panel lastLine;
+            if (last != null && keyboardRowDividers.TryGetValue(last, out lastLine)) lastLine.Visible = false;
+            return y;
+        }
+
+        private void LayoutKeyboardTabs(KeyboardSnapshot kb)
+        {
+            if (keyboardTabPages[0] == null) return;
+            string missing = Lang.T("沒有偵測到鍵盤；連上後會顯示這把鍵盤支援的項目。", "No keyboard detected; what it supports appears once it connects.");
+
+            int settingsBottom = StackKeyboardRows(new Control[] { keyboardLightGroup, keyboardLevelRow, keyboardFnGroup, keyboardOsGroup });
+            keyboardEmpty[0].Text = kb == null ? missing : Lang.T("這把鍵盤沒有可以在這裡調整的設定。", "This keyboard has no settings to change here.");
+            keyboardEmpty[0].Visible = settingsBottom == 0;
+
+            int delaysBottom = StackKeyboardRows(keyboardDelayRows);
+            keyboardDelayNote.Top = delaysBottom + S(12);
+            keyboardDelayNote.Visible = delaysBottom > 0;
+            keyboardEmpty[1].Text = kb == null ? missing : Lang.T("這把鍵盤不支援背光延遲（需要背光 v3）。", "This keyboard has no backlight delays (needs backlight v3).");
+            keyboardEmpty[1].Visible = delaysBottom == 0;
+
+            int shown = 0;
+            for (int i = 0; i < 8; i++)
+            {
+                if (!KeyboardWanted(keyboardDisabled[i])) continue;
+                keyboardDisabled[i].Location = new Point(S(8 + shown % 2 * 385), S(44 + shown / 2 * 44));
+                shown++;
+            }
+            keyboardDisableHint.Visible = shown > 0;
+            keyboardEmpty[2].Text = kb == null ? missing : Lang.T("這把鍵盤沒有可以停用的按鍵。", "This keyboard cannot disable any keys.");
+            keyboardEmpty[2].Visible = shown == 0;
+        }
+
+        // ---- Receiver page (Logi Bolt pairing) ----
+
+        // Same order as the macOS edition: the receiver, then "Pair a device", then the paired devices.
+        private void BuildReceiverPage(CardPanel page)
+        {
+            int right = 748;
+            int textWidth = right - 130 - 12 - 18;
+            receiverTitle.AutoSize = false;
+            receiverTitle.AutoEllipsis = true;
+            receiverTitle.UseMnemonic = false;
+            receiverTitle.TextAlign = ContentAlignment.MiddleLeft;
+            receiverTitle.Font = keyboardNameFont;
+            receiverTitle.Location = new Point(S(18), S(56));
+            receiverTitle.Size = new Size(S(right - 110 - 12 - 18), S(24));
+            page.Controls.Add(receiverTitle);
+            Button reload = Theme.CreateButton(Lang.T("重新讀取", "Reload"), false);
+            reload.Size = new Size(S(110), S(30));
+            reload.Location = new Point(S(right - 110), S(52));
+            reload.Click += delegate { RefreshReceiver(); };
+            page.Controls.Add(reload);
+            AddDivider(page, 88, S(right - 18));
+
+            // Pair a device.
+            page.Controls.Add(new Label { Text = Lang.T("配對新裝置", "Pair a device"), AutoSize = true, Location = new Point(S(18), S(98)) });
+            AddHint(page, Lang.T("按「開始配對」後 30 秒內，長按裝置上要用的 Easy-Switch 頻道鍵，直到燈號快速閃爍。",
+                "After Start Pairing, hold the Easy-Switch channel button you want within 30 s until its light blinks fast."), 122);
+            AddHint(page, Lang.T("配對會取代那個頻道原本的連線（例如原本以藍牙連到另一台電腦）。",
+                "Pairing replaces whatever that channel was connected to before (e.g. Bluetooth to another computer)."), 142);
+            pairingStart = Theme.CreateButton(Lang.T("開始配對", "Start Pairing"), true);
+            pairingStart.Size = new Size(S(130), S(30));
+            pairingStart.Location = new Point(S(right - 130), S(94));
+            pairingStart.Click += delegate
+            {
+                receiverMessage.Text = "";
+                if (demoReceiver == 0) bolt.StartPairing();
+            };
+            page.Controls.Add(pairingStart);
+            pairingStatus.AutoSize = false;
+            pairingStatus.AutoEllipsis = true;
+            pairingStatus.UseMnemonic = false;
+            pairingStatus.Location = new Point(S(18), S(166));
+            pairingStatus.Size = new Size(S(right - 18), S(22));
+            page.Controls.Add(pairingStatus);
+            pairingCode.AutoSize = false;
+            pairingCode.UseMnemonic = false;
+            pairingCode.TextAlign = ContentAlignment.MiddleLeft;
+            pairingCode.Font = new Font(Theme.UiFont, 17F, FontStyle.Bold);
+            pairingCode.Location = new Point(S(18), S(188));
+            pairingCode.Size = new Size(S(textWidth), S(38));
+            page.Controls.Add(pairingCode);
+            pairingCancel = Theme.CreateButton(Lang.T("取消", "Cancel"), false);
+            pairingCancel.Size = new Size(S(110), S(30));
+            pairingCancel.Location = new Point(S(right - 110), S(192));
+            pairingCancel.Visible = false;
+            pairingCancel.Click += delegate
+            {
+                if (demoReceiver != 0) return;
+                if (receiverSnapshot.Active) bolt.CancelPairing();
+                else bolt.DismissResult();
+            };
+            page.Controls.Add(pairingCancel);
+            // Paired devices: one panel that sits right under the pairing hints while nothing is going on,
+            // and moves down (UpdateReceiverUi) to make room for the status and code while pairing.
+            // Panel x=10 so the card's rounded border stays visible; inner x=8 is page x=18.
+            receiverPaired = new Panel { Bounds = new Rectangle(S(10), S(234), S(746), S(216)), BackColor = Theme.Card };
+            page.Controls.Add(receiverPaired);
+            receiverPaired.Controls.Add(new Panel { BackColor = Theme.Divider, Bounds = new Rectangle(S(8), 0, S(right - 18), 1) });
+            receiverPaired.Controls.Add(new Label { Text = Lang.T("已配對的裝置", "Paired devices"), AutoSize = true, Location = new Point(S(8), S(12)) });
+            receiverCount.AutoSize = true;
+            receiverCount.ForeColor = Theme.Muted;
+            receiverCount.Font = new Font(Theme.UiFont, 8.5F);
+            receiverCount.Location = new Point(S(8), S(36));
+            receiverPaired.Controls.Add(receiverCount);
+            receiverMessage.AutoSize = false;
+            receiverMessage.AutoEllipsis = true;
+            receiverMessage.UseMnemonic = false;
+            receiverMessage.TextAlign = ContentAlignment.TopRight;
+            receiverMessage.ForeColor = Theme.Muted;
+            receiverMessage.Font = new Font(Theme.UiFont, 8.5F);
+            receiverMessage.Location = new Point(S(190), S(36));
+            receiverMessage.Size = new Size(S(right - 200), S(18));
+            receiverPaired.Controls.Add(receiverMessage);
+            for (int i = 0; i < 6; i++)
+            {
+                int y = 62 + i * 30;
+                receiverRows[i] = new Label
                 {
                     AutoSize = false,
                     AutoEllipsis = true,
                     UseMnemonic = false,
                     TextAlign = ContentAlignment.MiddleLeft,
-                    Location = new Point(S(18), S(338 + i * 28)),
-                    Size = new Size(S(390), S(24))
+                    Font = new Font(Theme.UiFont, 9.5F),
+                    Location = new Point(S(8), S(y)),
+                    Size = new Size(S(right - 110 - 12 - 18), S(26)),
+                    Visible = false
                 };
-                page.Controls.Add(keyboardRowLabels[i]);
-                var combo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = S(320), Location = new Point(S(right - 320), S(338 + i * 28)) };
-                combo.SelectionChangeCommitted += delegate
-                {
-                    // Items: automatic, keyboard channels 1.., then "keyboard stays".
-                    int selected = combo.SelectedIndex;
-                    keyboardChannels[mouseChannel] = selected <= 0 ? -2 : selected == combo.Items.Count - 1 ? -1 : selected - 1;
-                    SaveSettings();
-                };
-                keyboardRowTargets[i] = combo;
-                page.Controls.Add(combo);
+                receiverPaired.Controls.Add(receiverRows[i]);
+                Button unpair = Theme.CreateButton(Lang.T("解除配對", "Unpair"), false);
+                unpair.Size = new Size(S(110), S(26));
+                unpair.Location = new Point(S(right - 110 - 10), S(y));
+                unpair.Visible = false;
+                int row = i;
+                unpair.Click += delegate { ConfirmUnpair(row); };
+                receiverUnpair[i] = unpair;
+                receiverPaired.Controls.Add(unpair);
             }
-            AddHint(page, Lang.T("自動：同名電腦的頻道，否則同一頻道號；Bolt 頻道在鍵盤上常記成 Logitech Bolt receiver，請手動指定",
-                "Auto: same computer name, else the same number. Bolt channels often read Logitech Bolt receiver; set them by hand"), 426);
-            RefreshKeyboardUi();
+            UpdateReceiverUi();
+        }
+
+        private void RefreshReceiver()
+        {
+            if (demoReceiver != 0) receiverSnapshot = DemoReceiver(demoReceiver);
+            else bolt.Refresh();
+            UpdateReceiverUi();
+        }
+
+        private void OnBoltReport(string text)
+        {
+            try
+            {
+                if (!IsHandleCreated || IsDisposed) return;
+                BeginInvoke(new Action(delegate
+                {
+                    if (liveLog.Checked) AddLog(DateTime.Now.ToString("HH:mm:ss.fff") + " Bolt " + text);
+                }));
+            }
+            catch { }
+        }
+
+        private void OnBoltChanged(BoltReceiverSnapshot snapshot)
+        {
+            try
+            {
+                if (!IsHandleCreated || IsDisposed) return;
+                BeginInvoke(new Action(delegate
+                {
+                    if (demoReceiver != 0) return;
+                    receiverSnapshot = snapshot;
+                    UpdateReceiverUi();
+                }));
+            }
+            catch { }
+        }
+
+        private static string BoltKindName(int kind)
+        {
+            switch (kind)
+            {
+                case 1: return Lang.T("鍵盤", "Keyboard");
+                case 2: return Lang.T("滑鼠", "Mouse");
+                case 3: return Lang.T("數字鍵盤", "Numpad");
+                case 4: return Lang.T("簡報器", "Presenter");
+                case 8: return Lang.T("軌跡球", "Trackball");
+                case 9: return Lang.T("觸控板", "Touchpad");
+                default: return Lang.T("裝置", "Device");
+            }
+        }
+
+        private static string BoltDisplayName(BoltSlot slot)
+        {
+            return slot.Name.Length > 0 ? slot.Name : BoltKindName(slot.Kind);
+        }
+
+        private void UpdateReceiverUi()
+        {
+            if (pairingStart == null) return;
+            BoltReceiverSnapshot s = receiverSnapshot;
+            receiverTitle.Text = s.Multiple ? Lang.T("偵測到多個 Logi Bolt 接收器，請只留一個再操作", "More than one Logi Bolt receiver found; leave only one plugged in")
+                : s.Present ? "Logi Bolt"
+                : Lang.T("沒有偵測到 Logi Bolt 接收器，插上後按「重新讀取」", "No Logi Bolt receiver found; plug it in and click Reload");
+            receiverCount.Text = !s.Present ? Lang.T("只支援 Logi Bolt；Unifying 與 Lightspeed 接收器不支援", "Logi Bolt only; Unifying and Lightspeed receivers are not supported")
+                : s.Slots.Count == 0 ? Lang.T("這個接收器還沒有配對任何裝置", "No devices are paired with this receiver yet")
+                : Lang.T("已使用 ", "") + s.Slots.Count + Lang.T("／6 個槽位", " of 6 slots in use");
+            for (int i = 0; i < 6; i++)
+            {
+                bool shown = i < s.Slots.Count;
+                receiverRows[i].Visible = shown;
+                receiverUnpair[i].Visible = shown;
+                if (!shown) continue;
+                BoltSlot slot = s.Slots[i];
+                receiverRows[i].Text = Lang.T("槽位 ", "Slot ") + slot.Slot + "　" + BoltDisplayName(slot) + "　—　" +
+                    BoltKindName(slot.Kind) + " · WPID " + slot.Wpid;
+                receiverUnpair[i].Enabled = !s.Active && !s.Multiple;
+            }
+
+            bool full = s.Slots.Count >= 6;
+            pairingStart.Text = s.Phase == BoltPhase.Failed ? Lang.T("再試一次", "Try Again") : Lang.T("開始配對", "Start Pairing");
+            pairingStart.Enabled = s.Present && !s.Multiple && !s.Active && !full;
+            pairingCancel.Visible = s.Phase != BoltPhase.Idle;
+            pairingCancel.Text = s.Active ? Lang.T("取消", "Cancel")
+                : s.Phase == BoltPhase.Succeeded ? Lang.T("完成", "Done") : Lang.T("關閉", "Close");
+            pairingStatus.ForeColor = s.Phase == BoltPhase.Failed ? Color.FromArgb(196, 43, 28)
+                : s.Phase == BoltPhase.Succeeded ? Color.FromArgb(16, 124, 16) : ForeColor;
+            pairingCode.Text = "";
+            string name = s.DeviceName.Length > 0 ? s.DeviceName : Lang.T("裝置", "the device");
+            switch (s.Phase)
+            {
+                case BoltPhase.Idle:
+                    pairingStatus.Text = s.Present && full
+                        ? Lang.T("6 個槽位都用完了，請先解除一個裝置的配對。", "All 6 slots are in use; unpair a device first.")
+                        : "";
+                    break;
+                case BoltPhase.Searching:
+                    pairingStatus.Text = Lang.T("正在尋找裝置… 請長按要配對的頻道鍵，直到燈號快速閃爍。", "Looking for a device… Hold the channel button until its light blinks fast.");
+                    break;
+                case BoltPhase.Pairing:
+                    pairingStatus.Text = Lang.T("找到「" + name + "」，正在配對…", "Found " + name + "; pairing…");
+                    break;
+                case BoltPhase.Passkey:
+                    if (s.KeyboardPasskey)
+                    {
+                        pairingStatus.Text = Lang.T("在「" + name + "」上輸入下面的數字，再按 Enter：", "On " + name + ", type these digits and press Enter:");
+                        pairingCode.Text = String.Join("  ", Array.ConvertAll(s.Code.ToCharArray(), c => c.ToString()));
+                    }
+                    else
+                    {
+                        pairingStatus.Text = Lang.T("在「" + name + "」上依序按下面的按鍵，最後左右鍵一起按：", "On " + name + ", click these buttons in order, then press left and right together:");
+                        bool[] sequence = BoltPackets.MouseSequence(s.Code);
+                        var text = new StringBuilder();
+                        foreach (bool rightButton in sequence)
+                            text.Append(rightButton ? Lang.T("右 ", "R ") : Lang.T("左 ", "L "));
+                        text.Append(Lang.T("＋ 左右一起", "+ both"));
+                        pairingCode.Text = text.ToString();
+                    }
+                    break;
+                case BoltPhase.Succeeded:
+                    pairingStatus.Text = Lang.T("已配對「" + name + "」（槽位 " + s.PairedSlot + "）。要切回其他電腦時，按裝置上的 Easy-Switch 鍵。",
+                        "Paired " + name + " (slot " + s.PairedSlot + "). Press its Easy-Switch button to go back to other computers.");
+                    break;
+                case BoltPhase.Failed:
+                    pairingStatus.Text = BoltFailureText(s.Failure);
+                    break;
+            }
+            bool quiet = s.Phase == BoltPhase.Idle && pairingStatus.Text.Length == 0;
+            pairingStatus.Visible = pairingCode.Visible = !quiet;
+            if (receiverPaired != null) receiverPaired.Top = S(quiet ? 166 : 234);
+        }
+
+        private static string BoltFailureText(BoltFailure failure)
+        {
+            switch (failure)
+            {
+                case BoltFailure.NoAnswer:
+                    return Lang.T("接收器沒有接受配對指令。如果開著 Logi Options+ 或 Logi Bolt，請先結束再試。",
+                        "The receiver did not accept the pairing command. Quit Logi Options+ or Logi Bolt and try again.");
+                case BoltFailure.NotFound:
+                    return Lang.T("30 秒內沒有找到要配對的裝置。請長按頻道鍵，直到燈號快速閃爍。",
+                        "No device asked to pair within 30 seconds. Hold the channel button until the light blinks fast.");
+                case BoltFailure.Timeout:
+                    return Lang.T("驗證沒有在時間內完成。", "Authentication was not completed in time.");
+                default:
+                    return Lang.T("配對沒有完成，可能是驗證碼按錯了。請再試一次。", "Pairing did not complete; the code may have been entered wrong. Try again.");
+            }
+        }
+
+        private void ConfirmUnpair(int row)
+        {
+            if (row >= receiverSnapshot.Slots.Count || receiverSnapshot.Active) return;
+            BoltSlot slot = receiverSnapshot.Slots[row];
+            string name = BoltDisplayName(slot);
+            string warning = Lang.T("裝置會從這個接收器斷線，要再用就得重新配對。", "The device disconnects from this receiver and has to be paired again to use it.");
+            if (slot.Kind == 2 || slot.Kind == 8 || slot.Kind == 9)
+                warning += Lang.T("\n如果這是你正在用的滑鼠，解除後游標會立刻不能動。", "\nIf this is the mouse you are using, the pointer stops moving right away.");
+            else if (slot.Kind == 1)
+                warning += Lang.T("\n如果這是你正在用的鍵盤，解除後會立刻不能打字。", "\nIf this is the keyboard you are using, typing stops right away.");
+            if (MessageBox.Show(this, warning, Lang.T("解除「" + name + "」的配對？", "Unpair " + name + "?"),
+                MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+            if (demoReceiver != 0) return;
+            receiverMessage.Text = Lang.T("解除配對中…", "Unpairing…");
+            bolt.Unpair(slot, delegate (int result)
+            {
+                try
+                {
+                    BeginInvoke(new Action(delegate
+                    {
+                        receiverMessage.Text = result == 1 ? Lang.T("已解除「" + name + "」的配對", "Unpaired " + name)
+                            : result == 2 ? Lang.T("槽位 " + slot.Slot + " 的裝置已經變了，沒有解除；請看過清單再試", "Slot " + slot.Slot + " holds a different device now; nothing was unpaired. Check the list and try again")
+                            : Lang.T("接收器沒有確認，「" + name + "」仍然配對著", "The receiver did not confirm; " + name + " is still paired");
+                    }));
+                }
+                catch { }
+            });
+        }
+
+        // --demo-receiver=N: a fake receiver for screenshots or checking the layout
+        // (1 normal, 2 searching, 3 keyboard passkey, 4 mouse passkey, 5 success, 6 failure).
+        private static BoltReceiverSnapshot DemoReceiver(int kind)
+        {
+            var s = new BoltReceiverSnapshot { Present = true };
+            s.Slots.Add(new BoltSlot { Slot = 1, Kind = 2, Wpid = "B042", Name = "MX Master 4" });
+            s.Slots.Add(new BoltSlot { Slot = 2, Kind = 1, Wpid = "B367", Name = "MX MCHNCL M" });
+            switch (kind)
+            {
+                case 2: s.Phase = BoltPhase.Searching; break;
+                case 3: s.Phase = BoltPhase.Passkey; s.Code = "482913"; s.DeviceName = "MX Keys S"; s.KeyboardPasskey = true; break;
+                case 4: s.Phase = BoltPhase.Passkey; s.Code = "000613"; s.DeviceName = "MX Anywhere 3S"; break;
+                case 5:
+                    s.Phase = BoltPhase.Succeeded; s.PairedSlot = 3; s.DeviceName = "MX Keys S";
+                    s.Slots.Add(new BoltSlot { Slot = 3, Kind = 1, Wpid = "B378", Name = "MX Keys S" });
+                    break;
+                case 6: s.Phase = BoltPhase.Failed; s.Failure = BoltFailure.NotFound; break;
+            }
+            return s;
         }
 
         private void OnKeyboardReport(string text)
@@ -3264,6 +3829,32 @@ namespace MXMasterWin
                     : kb.BatteryPercent + "%" + (kb.Charging ? Lang.T("（充電中）", " (charging)") : "");
                 keyboardFirmware.Text = kb == null || kb.Firmware.Length == 0 ? "—" : kb.Firmware;
 
+                WantKeyboard(keyboardLightGroup, kb != null && kb.BacklightPresent);
+                WantKeyboard(keyboardFnGroup, kb != null && kb.FnPresent);
+                WantKeyboard(keyboardOsGroup, kb != null && kb.Platforms.Count > 0);
+                keyboardPlatform.Items.Clear();
+                if (kb != null)
+                {
+                    foreach (SolaarFeatures.Platform platform in kb.Platforms)
+                    {
+                        keyboardPlatform.Items.Add(platform);
+                        if (platform.Id == kb.CurrentPlatform) keyboardPlatform.SelectedItem = platform;
+                    }
+                }
+                keyboardOsGroup.Enabled = kb != null && !kb.Asleep;
+                for (int i = 0; i < 8; i++)
+                {
+                    WantKeyboard(keyboardDisabled[i], kb != null && (kb.DisabledKeysMask & (1 << i)) != 0);
+                    keyboardDisabled[i].Enabled = kb != null && !kb.Asleep;
+                    keyboardDisabled[i].Checked = kb != null && (kb.DisabledKeys & (1 << i)) != 0;
+                }
+                for (int i = 0; i < 3; i++)
+                {
+                    bool present = kb != null && kb.BacklightDelays.Length == 3;
+                    WantKeyboard(keyboardDelayRows[i], present);
+                    keyboardDelayRows[i].Enabled = present && !kb.Asleep;
+                    if (present) keyboardDelays[i].Value = Math.Max(1, Math.Min(600, kb.BacklightDelays[i]));
+                }
                 keyboardBacklight.Items.Clear();
                 keyboardBacklightChoices.Clear();
                 if (kb != null && kb.BacklightPresent)
@@ -3281,7 +3872,7 @@ namespace MXMasterWin
                 }
                 keyboardBacklight.Enabled = kb != null && kb.BacklightPresent && !kb.Asleep;   // writes cannot reach a sleeping keyboard
                 bool manual = kb != null && kb.BacklightPresent && kb.BacklightEnabled && kb.BacklightMode == 3 && kb.BacklightLevels > 1;
-                keyboardLevelLabel.Visible = keyboardLevel.Visible = keyboardLevelValue.Visible = manual;
+                WantKeyboard(keyboardLevelRow, manual);
                 keyboardLevel.Enabled = kb != null && !kb.Asleep;
                 if (manual)
                 {
@@ -3307,6 +3898,7 @@ namespace MXMasterWin
                     combo.SelectedIndex = chosen == -2 ? 0 : chosen == -1 ? combo.Items.Count - 1 : Math.Min(chosen + 1, combo.Items.Count - 2);
                     combo.Enabled = keyboardFollow.Checked;
                 }
+                LayoutKeyboardTabs(kb);
             }
             finally { loadingKeyboard = false; }
         }
@@ -3449,7 +4041,9 @@ namespace MXMasterWin
             if (index == 2) ShowDevicePage();
             if (index == 3) ReadHapticStrength();
             if (index == 5) RefreshBattery();
+            if (index == 4) RefreshHosts();
             if (index == 6) RefreshKeyboard(true);
+            if (index == 7) RefreshReceiver();
             for (int i = 0; i < pages.Count; i++)
             {
                 pages[i].Visible = i == index;
@@ -5106,6 +5700,7 @@ namespace MXMasterWin
             }
             hidpp.Dispose();
             keyboard.Dispose();
+            bolt.Dispose();
             rawInput.Dispose();
             MouseHook.Uninstall();
             overlay.Close();
@@ -6236,9 +6831,190 @@ namespace MXMasterWin
         [DllImport("user32.dll")] private static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr wParam, IntPtr lParam);
     }
 
+    // Easy-Switch channel names (HID++ 0x1815 Hosts Info). When the channel the device is on now (this computer)
+    // holds a different name than this computer (a Bolt-paired channel stored as "Logitech Bolt receiver", or a
+    // renamed computer), this computer's name is written to the device, as Logi Options+ and Solaar
+    // (hidpp20.py get_host_names / set_host_name) do. Only the current channel is written.
+    //   function 0: [capabilities (bit 0 readable, bit 1 writable), ?, channel count, current channel]
+    //   function 1: [channel, status, bus, ?, name length, name limit]
+    //   function 4: write name [current channel, offset, up to 14 bytes]
+    // Pure logic; tools/host-name-test tests it on its own.
+    internal static class HostName
+    {
+        public const int ChunkSize = 14;
+
+        public static string ComputerName
+        {
+            get
+            {
+                try { return Environment.MachineName; }
+                catch { return ""; }
+            }
+        }
+
+        // Quotes, surrounding spaces and case do not count as a difference.
+        public static bool Same(string a, string b) { return Normalize(a) == Normalize(b); }
+
+        private static string Normalize(string text)
+        {
+            return (text ?? "").Replace('\u2019', '\'').Replace('\u2018', '\'').Trim().ToLowerInvariant();
+        }
+
+        // UTF-8, at most maxLength bytes, never cutting a character in two.
+        public static byte[] Encode(string name, int maxLength)
+        {
+            var bytes = new List<byte>();
+            var e = System.Globalization.StringInfo.GetTextElementEnumerator(name ?? "");
+            while (e.MoveNext())
+            {
+                byte[] piece = Encoding.UTF8.GetBytes((string)e.Current);
+                if (bytes.Count + piece.Length > maxLength) break;
+                bytes.AddRange(piece);
+            }
+            return bytes.ToArray();
+        }
+
+        // Write when the device can, this computer has a name, and the stored one differs from it as it would be
+        // stored (cut to the limit, so an over-long name is not written again on every read).
+        public static bool NeedsWrite(byte capabilities, string stored, string computer, int maxLength)
+        {
+            if ((capabilities & 0x02) == 0 || maxLength <= 0) return false;
+            string fitted = Encoding.UTF8.GetString(Encode(computer, maxLength));
+            return fitted.Length > 0 && !Same(stored, fitted);
+        }
+
+        // Function 4 parameters: [channel, offset, up to 14 bytes] per piece.
+        public static List<byte[]> WritePackets(int host, byte[] name)
+        {
+            var packets = new List<byte[]>();
+            for (int offset = 0; offset < name.Length; offset += ChunkSize)
+            {
+                int take = Math.Min(ChunkSize, name.Length - offset);
+                byte[] p = new byte[2 + take];
+                p[0] = (byte)host;
+                p[1] = (byte)offset;
+                Array.Copy(name, offset, p, 2, take);
+                packets.Add(p);
+            }
+            return packets;
+        }
+    }
+
+    // Pure HID++ codecs. Protocol references: Solaar settings_templates.py ScrollRatchetTorque,
+    // DisableKeyboardKeys, Multiplatform, Backlight2Duration*, ThumbInvert, HiresSmoothResolution;
+    // hidpp20.py Backlight. Replies include their four-byte HID++ header.
+    internal static class SolaarFeatures
+    {
+        public static byte[] Torque(byte[] caps, byte[] current, int value)
+        {
+            if (caps == null || caps.Length < 5 || (caps[4] & 1) == 0 || current == null || current.Length < 7 ||
+                current[4] < 1 || current[4] > 2 || value < 1 || value > 100) return null;
+            return new byte[] { current[4], current[5], (byte)value };
+        }
+        public static bool? MaskValue(byte[] reply, int offset, byte mask, int width)
+        {
+            if (reply == null || offset < 0 || offset >= width || reply.Length < 4 + width) return null;
+            return (reply[4 + offset] & mask) != 0;
+        }
+        public static bool Matches(byte[] reply, byte[] parameters)
+        {
+            if (reply == null || parameters == null || parameters.Length == 0 || reply.Length < 4 + parameters.Length) return false;
+            for (int i = 0; i < parameters.Length; i++) if (reply[4 + i] != parameters[i]) return false;
+            return true;
+        }
+        public static byte[] Masked(byte[] current, int offset, byte mask, bool on, int width)
+        {
+            if (current == null || width <= 0 || offset < 0 || offset >= width || current.Length < 4 + width) return null;
+            byte[] p = new byte[width];
+            Array.Copy(current, 4, p, 0, width);
+            p[offset] = (byte)(on ? p[offset] | mask : p[offset] & ~mask);
+            return p;
+        }
+        public static byte[] DisabledKey(byte[] caps, byte[] current, int bit, bool disabled)
+        {
+            if (caps == null || caps.Length < 5 || bit < 0 || bit > 7 || (caps[4] & (1 << bit)) == 0) return null;
+            return Masked(current, 0, (byte)(1 << bit), disabled, 1);
+        }
+        public static string DisableName(int bit)
+        {
+            string[] names = { "Caps Lock", "Num Lock", "Scroll Lock", "Insert", "Win / ⌘" };
+            return bit >= 0 && bit < names.Length ? names[bit] : "0x" + (1 << bit).ToString("X2");
+        }
+        internal sealed class Platform
+        {
+            public int Id;
+            public string Name;
+            public override string ToString() { return Name; }
+        }
+        private static string Version(int value)
+        {
+            return value == 0 ? "" : (value & 255) == 0 ? (value >> 8).ToString() : (value >> 8) + "." + (value & 255);
+        }
+        public static Platform ParsePlatform(byte[] d) { return ParsePlatform(d, 0); }
+        private static Platform ParsePlatform(byte[] d, int preferredMask)
+        {
+            if (d == null || d.Length < 12) return null;
+            int flags = (d[6] << 8) | d[7];
+            string[] names = { "Linux", "macOS", "Windows", "iOS", "Android", "WebOS", "Chrome", "WinEmb", "Tizen" };
+            int[] masks = { 0x0400, 0x2000, 0x0100, 0x4000, 0x1000, 0x8000, 0x0800, 0x0200, 0x0001 };
+            for (int i = 0; i < masks.Length; i++)
+            {
+                if ((flags & masks[i]) == 0 || (preferredMask != 0 && masks[i] != preferredMask)) continue;
+                int low = (d[8] << 8) | d[9], high = (d[10] << 8) | d[11];
+                return new Platform { Id = d[4], Name = names[i] + (low == 0 && high == 0 ? "" : " " + Version(low) + "–" + Version(high)) };
+            }
+            return null;
+        }
+        public static List<Platform> Platforms(List<byte[]> descriptors)
+        {
+            var choices = new List<Platform>();
+            foreach (int mask in new[] { 0x0400, 0x2000, 0x0100, 0x4000, 0x1000, 0x8000, 0x0800, 0x0200, 0x0001 })
+                foreach (byte[] d in descriptors)
+                {
+                    Platform p = ParsePlatform(d, mask);
+                    if (p != null && !choices.Exists(delegate(Platform old) { return old.Id == p.Id || old.Name == p.Name; })) choices.Add(p);
+                }
+            return choices;
+        }
+        public static byte[] PlatformWrite(byte[] info, List<Platform> choices, int selected)
+        {
+            if (info == null || info.Length < 11 || (info[4] & 2) == 0 || selected < 0 || selected > 255 ||
+                choices == null || !choices.Exists(delegate(Platform p) { return p.Id == selected; })) return null;
+            return new byte[] { 0xFF, (byte)selected };
+        }
+        public static bool PlatformMatches(byte[] info, int selected, int beforeHost, int afterHost)
+        {
+            return info != null && info.Length >= 11 && beforeHost >= 0 && beforeHost == afterHost && info[10] == selected;
+        }
+        public static int Duration(byte[] reply, int field)
+        {
+            if (reply == null || reply.Length < 16 || field < 0 || field > 2) return -1;
+            int i = 10 + field * 2;
+            return (reply[i] | (reply[i + 1] << 8)) * 5;
+        }
+        public static byte[] BacklightDelay(byte[] r, int version, int field, int seconds)
+        {
+            if (r == null || r.Length < 16 || version < 3 || field < 0 || field > 2 || seconds < 1 || seconds > 600) return null;
+            int mode = (r[5] >> 3) & 3;
+            byte[] p = new byte[] { r[4], (byte)((r[5] & 7) | (mode << 3)), 0xFF, mode == 3 ? r[9] : (byte)0,
+                r[10], r[11], r[12], r[13], r[14], r[15] };
+            int units = (seconds + 4) / 5, i = 4 + field * 2;
+            p[i] = (byte)(units & 255); p[i + 1] = (byte)(units >> 8);
+            return p;
+        }
+        public static bool BacklightMatches(byte[] r, byte[] p)
+        {
+            if (r == null || r.Length < 16 || p == null || p.Length != 10 || r[4] != p[0] || (r[5] & 0x1F) != p[1] ||
+                (((p[1] >> 3) & 3) == 3 && r[9] != p[3])) return false;
+            for (int i = 0; i < 6; i++) if (r[10 + i] != p[4 + i]) return false;
+            return true;
+        }
+    }
+
     internal sealed class HidppDiversionManager : IDisposable
     {
         private const ushort TargetFeature = 0x1B04;
+        private bool hostNameTried;     // this connection already tried to write the channel name (under sync)
         private const byte SoftwareId = 0x0A;
         private const uint GenericRead = 0x80000000;
         private const uint GenericWrite = 0x40000000;
@@ -6474,6 +7250,7 @@ namespace MXMasterWin
                     if (candidateTransport.IsBolt) lastBoltIndex = candidateDevice;
                     featureIndex = root[4];
                     int version = root[6];
+                    hostNameTried = false;
                     Report(transport.Name + " dev=" + deviceIndex.ToString("X2") +
                         " feature 1B04 index=" + featureIndex.ToString("X2") + " v" + version);
                     break;
@@ -6616,6 +7393,18 @@ namespace MXMasterWin
                     ReadSmartShift(snapshot);
                     ReadWheelDirection(snapshot);
                     ReadHaptic(snapshot);
+                    byte[] torqueCaps = Call(0x2111, 0), torque = Call(0x2111, 1);
+                    if (torque != null && torque.Length >= 7 && SolaarFeatures.Torque(torqueCaps, torque, torque[6]) != null)
+                    {
+                        snapshot.TorquePresent = true;
+                        snapshot.RatchetTorque = torque[6];
+                    }
+                    byte[] thumb = Call(0x2150, 1);
+                    if (thumb != null && thumb.Length >= 6)
+                    {
+                        snapshot.ThumbInvertPresent = true;
+                        snapshot.ThumbInverted = SolaarFeatures.MaskValue(thumb, 1, 1, 2) == true;
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -6734,6 +7523,7 @@ namespace MXMasterWin
             if (wheelCapability.Length > 0) snapshot.Raw.Add("2121 capability=" + wheelCapability);
             snapshot.WheelInvertPresent = true;
             snapshot.WheelInverted = (reply[4] & 0x04) != 0;
+            snapshot.HiresResolution = SolaarFeatures.MaskValue(reply, 0, 2, 1) == true;
         }
 
         private void ReadHaptic(DeviceSnapshot snapshot)
@@ -6773,6 +7563,35 @@ namespace MXMasterWin
                     if (Call(feature, enhanced ? 2 : 1, (byte)mode, (byte)threshold) == null) return false;
                     byte[] check = Call(feature, enhanced ? 1 : 0);
                     return check != null && check[4] == mode && check[5] == threshold;
+                }
+                catch { return false; }
+            }
+        }
+
+        public bool SetRatchetTorque(int value)
+        {
+            lock (sync)
+            {
+                if (disposed || transport == null) return false;
+                try
+                {
+                    byte[] p = SolaarFeatures.Torque(Call(0x2111, 0), Call(0x2111, 1), value);
+                    return p != null && Call(0x2111, 2, p) != null && SolaarFeatures.Matches(Call(0x2111, 1), p);
+                }
+                catch { return false; }
+            }
+        }
+        public bool SetThumbInvert(bool value) { return SetWheelBit(0x2150, 1, 1, value, 2); }
+        public bool SetHiresResolution(bool value) { return SetWheelBit(0x2121, 0, 2, value, 1); }
+        private bool SetWheelBit(int feature, int offset, byte mask, bool value, int width)
+        {
+            lock (sync)
+            {
+                if (disposed || transport == null) return false;
+                try
+                {
+                    byte[] p = SolaarFeatures.Masked(Call(feature, 1), offset, mask, value, width);
+                    return p != null && Call(feature, 2, p) != null && SolaarFeatures.Matches(Call(feature, 1), p);
                 }
                 catch { return false; }
             }
@@ -6877,6 +7696,41 @@ namespace MXMasterWin
 
         // ---- Easy-Switch hosts (0x1814 Change Host, 0x1815 Hosts Info; byte layouts follow Solaar) ----
 
+        // The current channel's name differs from this computer: write this computer's name (see HostName),
+        // confirmed by reading it back; tried once per connection.
+        private string WriteHostName(int current, string stored)
+        {
+            hostNameTried = true;
+            string computer = HostName.ComputerName;
+            byte[] caps = Call(0x1815, 0);
+            byte[] info = Call(0x1815, 1, (byte)current);
+            if (caps == null || info == null || !HostName.NeedsWrite(caps[4], stored, computer, info[9])) return null;
+            string fitted = Encoding.UTF8.GetString(HostName.Encode(computer, info[9]));
+            foreach (byte[] packet in HostName.WritePackets(current, HostName.Encode(computer, info[9])))
+            {
+                if (Call(0x1815, 4, packet) == null)
+                {
+                    Report("host name write failed");
+                    return null;
+                }
+            }
+            byte[] after = Call(0x1815, 1, (byte)current);
+            if (after == null) return null;
+            var name = new List<byte>();
+            while (name.Count < after[8])
+            {
+                byte[] piece = Call(0x1815, 3, (byte)current, (byte)name.Count);
+                if (piece == null) break;
+                int take = Math.Min(after[8] - name.Count, Math.Min(14, piece.Length - 6));
+                if (take <= 0) break;
+                for (int k = 0; k < take; k++) name.Add(piece[6 + k]);
+            }
+            string now = Encoding.UTF8.GetString(name.ToArray());
+            Report("host name of channel " + (current + 1) + " written: " + (HostName.Same(now, fitted) ? "confirmed" : "not confirmed"));
+            return now;
+        }
+
+
         // The host stored on each channel and the channel the mouse is on now (-1 when unknown).
         public List<HostEntry> ReadHosts(out int current)
         {
@@ -6916,6 +7770,11 @@ namespace MXMasterWin
                         summary.Append(" " + i + ":" + (entry.Name.Length == 0 ? "-" : entry.Name) + "/" + entry.Bus);
                     }
                     Report("hosts current=" + current + summary);
+                    if (!hostNameTried && current >= 0 && current < hosts.Count)
+                    {
+                        string written = WriteHostName(current, hosts[current].Name);
+                        if (written != null) hosts[current].Name = written;
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -7167,6 +8026,201 @@ namespace MXMasterWin
             }
         }
 
+        // The Logi Bolt receiver's own HID++ collections, for BoltReceiver: the short one (report 0x10, 7 bytes)
+        // and the long one (0x11, 20 bytes). Windows exposes them as separate collections; register reads and
+        // writes are answered, and some notifications are sent, on the short one. Each collection gets one
+        // handle for a reader thread and another for writing, so the two never share a stream.
+        internal sealed class BoltPort : IDisposable
+        {
+            private sealed class Channel
+            {
+                public FileStream Reader, Writer;
+                public int InputLength, OutputLength;
+            }
+
+            private Channel shortChannel, longChannel;
+            private volatile bool closed;
+            public event Action<byte[]> Received;
+            public bool Multiple;       // more than one receiver: only the first one's collections are opened
+
+            // The same receiver's collections share the device path except for the collection number
+            // (...&MI_02&COL01#7&1A2B3C4D&0&0000#... and ...&MI_02&COL02#7&1A2B3C4D&0&0001#...).
+            internal static string ReceiverKey(string path)
+            {
+                string[] parts = path.ToUpperInvariant().Split('#');
+                if (parts.Length < 3) return path.ToUpperInvariant();
+                string device = System.Text.RegularExpressions.Regex.Replace(parts[1], "&COL[0-9A-F]+", "");
+                string instance = parts[2];
+                int cut = instance.LastIndexOf('&');
+                if (cut > 0) instance = instance.Substring(0, cut);
+                return device + "#" + instance;
+            }
+
+            public static BoltPort Open(Action<string> report)
+            {
+                var port = new BoltPort();
+                var receivers = new List<string>();
+                foreach (string path in ReceiverPaths())
+                {
+                    // Windows lists each receiver interface (MI_00 keyboard, MI_01 mouse, MI_02 HID++) as its
+                    // own path, so check the collection first and compare receivers among HID++ ones only;
+                    // otherwise the first interface listed (usually MI_00) hid the HID++ one.
+                    HIDP_CAPS caps;
+                    SafeFileHandle probe = OpenPath(path);
+                    if (probe == null) continue;
+                    bool ok = TryGetCaps(probe, out caps);
+                    probe.Dispose();
+                    if (!ok || caps.UsagePage != 0xFF00) continue;
+                    bool isLong = caps.OutputReportByteLength >= 20 && caps.InputReportByteLength >= 20;
+                    bool isShort = caps.OutputReportByteLength == 7 && caps.InputReportByteLength == 7;
+                    if (!isLong && !isShort) continue;
+                    string key = ReceiverKey(path);
+                    if (!receivers.Contains(key)) receivers.Add(key);
+                    if (key != receivers[0]) continue;
+                    if (isLong ? port.longChannel != null : port.shortChannel != null) continue;
+                    SafeFileHandle reader = OpenPath(path), writer = OpenPath(path);
+                    if (reader == null || writer == null)
+                    {
+                        if (reader != null) reader.Dispose();
+                        if (writer != null) writer.Dispose();
+                        continue;
+                    }
+                    var channel = new Channel
+                    {
+                        InputLength = caps.InputReportByteLength,
+                        OutputLength = caps.OutputReportByteLength,
+                        Reader = new FileStream(reader, FileAccess.ReadWrite, Math.Max(caps.InputReportByteLength, caps.OutputReportByteLength), true),
+                        Writer = new FileStream(writer, FileAccess.ReadWrite, Math.Max(caps.InputReportByteLength, caps.OutputReportByteLength), true)
+                    };
+                    if (isLong) port.longChannel = channel; else port.shortChannel = channel;
+                }
+                if (port.longChannel == null)
+                {
+                    port.Dispose();
+                    return null;
+                }
+                port.Multiple = receivers.Count > 1;
+                report("receiver HID++ collections: long" + (port.shortChannel != null ? " + short" : " only") +
+                    (port.Multiple ? "; " + receivers.Count + " receivers plugged in" : ""));
+                return port;
+            }
+
+            public void Start()
+            {
+                foreach (Channel channel in new[] { shortChannel, longChannel })
+                {
+                    if (channel == null) continue;
+                    Channel c = channel;
+                    var thread = new Thread(delegate () { ReadLoop(c); }) { IsBackground = true, Name = "MXMasterWin Bolt reader" };
+                    thread.Start();
+                }
+            }
+
+            private void ReadLoop(Channel channel)
+            {
+                byte[] buffer = new byte[channel.InputLength];
+                while (!closed)
+                {
+                    int read;
+                    try { read = channel.Reader.Read(buffer, 0, buffer.Length); }
+                    catch { break; }
+                    if (read <= 0) break;
+                    byte[] copy = new byte[read];
+                    Array.Copy(buffer, copy, read);
+                    Action<byte[]> handler = Received;
+                    if (handler != null)
+                    {
+                        try { handler(copy); }
+                        catch { }
+                    }
+                }
+            }
+
+            // A short packet goes to the short collection; without one it is sent as a long report instead.
+            public bool Write(byte[] packet)
+            {
+                if (closed || packet == null || packet.Length < 4) return false;
+                Channel channel = packet[0] == 0x10 && shortChannel != null ? shortChannel : longChannel;
+                byte[] data = new byte[channel.OutputLength];
+                Array.Copy(packet, data, Math.Min(packet.Length, data.Length));
+                if (channel == longChannel) data[0] = 0x11;
+                try
+                {
+                    channel.Writer.Write(data, 0, data.Length);
+                    channel.Writer.Flush();
+                    return true;
+                }
+                catch { return false; }
+            }
+
+            public void Dispose()
+            {
+                closed = true;
+                foreach (Channel channel in new[] { shortChannel, longChannel })
+                {
+                    if (channel == null) continue;
+                    try { channel.Reader.Dispose(); }
+                    catch { }
+                    try { channel.Writer.Dispose(); }
+                    catch { }
+                }
+            }
+
+            private static bool TryGetCaps(SafeFileHandle file, out HIDP_CAPS caps)
+            {
+                caps = new HIDP_CAPS();
+                IntPtr preparsed;
+                if (!HidD_GetPreparsedData(file, out preparsed)) return false;
+                try { return HidP_GetCaps(preparsed, out caps) == HidpStatusSuccess; }
+                finally { HidD_FreePreparsedData(preparsed); }
+            }
+
+            private static SafeFileHandle OpenPath(string path)
+            {
+                SafeFileHandle file = CreateFile(path, GenericRead | GenericWrite, FileShareRead | FileShareWrite,
+                    IntPtr.Zero, OpenExisting, FileFlagOverlapped, IntPtr.Zero);
+                if (!file.IsInvalid) return file;
+                file.Dispose();
+                return null;
+            }
+
+            private static List<string> ReceiverPaths()
+            {
+                var paths = new List<string>();
+                Guid hidGuid;
+                HidD_GetHidGuid(out hidGuid);
+                IntPtr infoSet = SetupDiGetClassDevs(ref hidGuid, IntPtr.Zero, IntPtr.Zero, DigcfPresent | DigcfDeviceInterface);
+                if (infoSet == new IntPtr(-1)) return paths;
+                try
+                {
+                    for (uint index = 0; ; index++)
+                    {
+                        SP_DEVICE_INTERFACE_DATA data = new SP_DEVICE_INTERFACE_DATA();
+                        data.cbSize = Marshal.SizeOf(typeof(SP_DEVICE_INTERFACE_DATA));
+                        if (!SetupDiEnumDeviceInterfaces(infoSet, IntPtr.Zero, ref hidGuid, index, ref data))
+                        {
+                            if (Marshal.GetLastWin32Error() == 259) break;
+                            continue;
+                        }
+                        uint required = 0;
+                        SetupDiGetDeviceInterfaceDetail(infoSet, ref data, IntPtr.Zero, 0, ref required, IntPtr.Zero);
+                        if (required == 0) continue;
+                        IntPtr detail = Marshal.AllocHGlobal((int)required);
+                        try
+                        {
+                            Marshal.WriteInt32(detail, IntPtr.Size == 8 ? 8 : 6);
+                            if (!SetupDiGetDeviceInterfaceDetail(infoSet, ref data, detail, required, ref required, IntPtr.Zero)) continue;
+                            string path = Marshal.PtrToStringUni(new IntPtr(detail.ToInt64() + 4));
+                            if (!String.IsNullOrEmpty(path) && path.ToUpperInvariant().Contains("VID_046D&PID_C548")) paths.Add(path);
+                        }
+                        finally { Marshal.FreeHGlobal(detail); }
+                    }
+                }
+                finally { SetupDiDestroyDeviceInfoList(infoSet); }
+                return paths;
+            }
+        }
+
         [StructLayout(LayoutKind.Sequential)]
         private struct SP_DEVICE_INTERFACE_DATA
         {
@@ -7218,6 +8272,690 @@ namespace MXMasterWin
     }
 
     // What the keyboard reported; null in MainForm means no keyboard is connected to this computer.
+    // ---- Logi Bolt pairing ----
+    // HID++ 1.0 registers and receiver notifications, packet layout per Solaar (lib/logitech_receiver/
+    // receiver.py BoltReceiver, notifications.py, base.py request/write). Same logic as BoltProtocol.swift
+    // in the macOS edition. BoltPackets and BoltPairingFlow are pure (no I/O) so tools/bolt-pairing-test can
+    // drive them with a fake receiver.
+    //   0x00   notification flags (3 bytes; WIRELESS = 0x000100 is needed for the pairing notifications)
+    //   0xC0   discovery: [timeout seconds, 1 start / 2 cancel]
+    //   0x2C1  pairing: [1 pair / 2 cancel / 3 unpair, slot, address x6, authentication, entropy (keyboard 20, else 10)]
+    //   0x2B5  receiver info: sub-register 0x5N pairing info of slot N, 0x6N 01 name of slot N
+    // Notifications (10/11 FF <sub> <address> data...): 0x53 discovery status (address 0 = discovering),
+    // 0x4F discovered device, 0x54 pairing status (address 0 = in progress, 2 = done), 0x4D passkey.
+    internal sealed class BoltSlot
+    {
+        public int Slot;
+        public int Kind;            // HID++ 1.0 kind: 1 keyboard, 2 mouse, 3 numpad, 4 presenter, 8 trackball, 9 touchpad
+        public string Wpid = "";
+        public string Serial = "";
+        public string Name = "";
+    }
+
+    internal enum BoltPhase { Idle, Searching, Pairing, Passkey, Succeeded, Failed }
+
+    internal enum BoltFailure
+    {
+        None,
+        NoAnswer,       // the receiver did not accept the discovery or pair command
+        NotFound,       // discovery ended without a device asking to pair
+        Timeout,        // the device did not finish in time (e.g. the passkey was not completed)
+        Failed          // the receiver reported a failure (e.g. a wrong passkey)
+    }
+
+    internal static class BoltPackets
+    {
+        public const int WirelessFlag = 0x000100;
+        public const byte SearchSeconds = 30;
+
+        // Write 0x80 / read 0x81, plus 2 for the long registers (0x2xx). A long report (0x11, 20 bytes) when
+        // there are more than 3 parameter bytes or for a long-register write, otherwise a short one (0x10, 7 bytes).
+        public static byte[] Register(int register, bool write, params byte[] parameters)
+        {
+            int sub = (write ? 0x80 : 0x81) | ((register >> 8) & 0x02);
+            bool isLong = parameters.Length > 3 || sub == 0x82;
+            byte[] packet = new byte[isLong ? 20 : 7];
+            packet[0] = (byte)(isLong ? 0x11 : 0x10);
+            packet[1] = 0xFF;
+            packet[2] = (byte)sub;
+            packet[3] = (byte)(register & 0xFF);
+            for (int i = 0; i < parameters.Length && i + 4 < packet.Length; i++) packet[i + 4] = parameters[i];
+            return packet;
+        }
+
+        public static byte[] ReadFlags() { return Register(0x00, false); }
+        public static byte[] WriteFlags(int flags)
+        {
+            return Register(0x00, true, (byte)((flags >> 16) & 0xFF), (byte)((flags >> 8) & 0xFF), (byte)(flags & 0xFF));
+        }
+        public static byte[] Discover(bool start) { return Register(0xC0, true, SearchSeconds, (byte)(start ? 0x01 : 0x02)); }
+        public static byte[] Pair(byte[] address, byte authentication, byte entropy)
+        {
+            byte[] p = new byte[10];
+            p[0] = 0x01;
+            p[1] = 0x00;
+            for (int i = 0; i < 6 && i < address.Length; i++) p[2 + i] = address[i];
+            p[8] = authentication;
+            p[9] = entropy;
+            return Register(0x2C1, true, p);
+        }
+        public static byte[] CancelPairing() { return Register(0x2C1, true, 0x02, 0x00, 0, 0, 0, 0, 0, 0, 0x00, 20); }
+        public static byte[] Unpair(int slot) { return Register(0x2C1, true, 0x03, (byte)slot); }
+        public static byte[] ReadPairing(int slot) { return Register(0x2B5, false, (byte)(0x50 + slot)); }
+        public static byte[] ReadName(int slot) { return Register(0x2B5, false, (byte)(0x60 + slot), 0x01); }
+
+        // Whether reply answers request (0x83 B5 also has to match the sub-register).
+        public static bool IsReply(byte[] reply, byte[] request)
+        {
+            if (reply == null || request == null || reply.Length < 5 || request.Length < 5) return false;
+            if (reply[1] != 0xFF || reply[2] != request[2] || reply[3] != request[3]) return false;
+            if (request[2] == 0x83 && request[3] == 0xB5) return reply[4] == request[4];
+            return true;
+        }
+
+        // The receiver's error for request (10 FF 8F <sub> <address> <code>).
+        public static bool IsError(byte[] reply, byte[] request)
+        {
+            return reply != null && request != null && reply.Length >= 6 && request.Length >= 4 &&
+                reply[0] == 0x10 && reply[1] == 0xFF && reply[2] == 0x8F && reply[3] == request[2] && reply[4] == request[3];
+        }
+
+        public static int Flags(byte[] reply)
+        {
+            if (reply == null || reply.Length < 7) return -1;
+            return (reply[4] << 16) | (reply[5] << 8) | reply[6];
+        }
+
+        // 0x2B5 0x5N reply: kind in the low nibble of [5], WPID is [7][6], serial [8..11].
+        public static BoltSlot ParseSlot(int slot, byte[] pairing, byte[] name)
+        {
+            if (pairing == null || pairing.Length < 12) return null;
+            int kind = pairing[5] & 0x0F;
+            string wpid = pairing[7].ToString("X2") + pairing[6].ToString("X2");
+            if (kind == 0 && wpid == "0000") return null;
+            var entry = new BoltSlot { Slot = slot, Kind = kind, Wpid = wpid };
+            entry.Serial = pairing[8].ToString("X2") + pairing[9].ToString("X2") + pairing[10].ToString("X2") + pairing[11].ToString("X2");
+            if (name != null && name.Length >= 8)
+            {
+                int length = Math.Min(14, Math.Min(name[6], name.Length - 7));
+                if (length > 0) entry.Name = Encoding.UTF8.GetString(name, 7, length);
+            }
+            return entry;
+        }
+
+        // A mouse passkey: the number as 10 binary digits, 1 = right button, 0 = left (true = right).
+        public static bool[] MouseSequence(string code)
+        {
+            int value;
+            if (!Int32.TryParse(code, out value)) return new bool[0];
+            string bits = Convert.ToString(value, 2);
+            if (bits.Length < 10) bits = new string('0', 10 - bits.Length) + bits;
+            bool[] result = new bool[bits.Length];
+            for (int i = 0; i < bits.Length; i++) result[i] = bits[i] == '1';
+            return result;
+        }
+    }
+
+    // One pairing attempt: after discovery starts, feed it the receiver's notifications; it decides what to send next.
+    internal sealed class BoltPairingFlow
+    {
+        public enum Output { None, Send, Finished, ClosedWithoutResult }
+
+        public BoltPhase Phase = BoltPhase.Idle;
+        public BoltFailure Failure = BoltFailure.None;
+        public string Code = "";
+        public string DeviceName = "";
+        public int DeviceKind;
+        public bool KeyboardPasskey;
+        public int PairedSlot = -1;
+        public bool PairSent, LockOpen, Discovering;
+        public bool ClosedWaiting;      // the pairing state closed without a result; a new slot's connection notice decides
+        public byte[] Outgoing;         // the packet to send when Handle returns Output.Send
+
+        private int counter = -1;
+        private byte[] address;
+        private int authentication = -1;
+        private string name;
+        private HashSet<int> knownSlots = new HashSet<int>();
+
+        public bool Active
+        {
+            get { return Phase == BoltPhase.Searching || Phase == BoltPhase.Pairing || Phase == BoltPhase.Passkey; }
+        }
+
+        public void Reset()
+        {
+            Phase = BoltPhase.Idle;
+            Failure = BoltFailure.None;
+            Code = "";
+            DeviceName = "";
+            DeviceKind = 0;
+            KeyboardPasskey = false;
+            PairedSlot = -1;
+            PairSent = LockOpen = Discovering = ClosedWaiting = false;
+            Outgoing = null;
+            counter = -1;
+            address = null;
+            authentication = -1;
+            name = null;
+            knownSlots = new HashSet<int>();
+        }
+
+        public void Begin(IEnumerable<int> known)
+        {
+            Reset();
+            knownSlots = new HashSet<int>(known);
+            Phase = BoltPhase.Searching;
+            Discovering = true;
+        }
+
+        public void Fail(BoltFailure failure)
+        {
+            if (!Active) return;
+            Phase = BoltPhase.Failed;
+            Failure = failure;
+        }
+
+        // What to send to stop whatever may be running on the receiver: the pairing if it was asked for,
+        // discovery if it may still run. Used on cancel and when a command got no reply (it may have run anyway).
+        public List<byte[]> CleanupPackets()
+        {
+            var packets = new List<byte[]>();
+            if (PairSent || LockOpen) packets.Add(BoltPackets.CancelPairing());
+            if (Discovering) packets.Add(BoltPackets.Discover(false));
+            return packets;
+        }
+
+        // The user cancelled: the packets to send.
+        public List<byte[]> Cancel()
+        {
+            List<byte[]> packets = CleanupPackets();
+            Phase = BoltPhase.Idle;
+            return packets;
+        }
+
+        public Output Handle(byte[] r)
+        {
+            Outgoing = null;
+            if (!Active || r == null || r.Length < 7 || (r[0] != 0x10 && r[0] != 0x11)) return Output.None;
+            if (r[1] != 0xFF)
+            {
+                // Once the pairing state closed without a result, a connection notice from a slot that was not
+                // paired before (10 slot 41 ..., bit 6 of [4] clear = connected) means done. Not earlier: an
+                // already paired device waking up would be taken for the new one.
+                int slot = r[1];
+                if (PairSent && ClosedWaiting && r[2] == 0x41 && (r[4] & 0x40) == 0 && slot >= 1 && slot <= 6 && !knownSlots.Contains(slot))
+                {
+                    Succeed(slot);
+                    return Output.Finished;
+                }
+                return Output.None;
+            }
+            byte address = r[3];
+            byte error = r[4];
+            switch (r[2])
+            {
+                case 0x53:      // discovery status
+                    Discovering = address == 0x00;
+                    if (Discovering || PairSent) return Output.None;
+                    Phase = BoltPhase.Failed;
+                    Failure = error == 0x01 || error == 0 ? BoltFailure.NotFound : BoltFailure.Failed;
+                    return Output.Finished;
+                case 0x4F:      // discovered device (part 0: kind, address, authentication; part 1: name)
+                    if (PairSent || r.Length < 20) return Output.None;
+                    int count = address + r[4] * 256;
+                    if (counter < 0) counter = count;
+                    else if (counter != count) return Output.None;
+                    if (r[5] == 0)
+                    {
+                        DeviceKind = r[7];
+                        this.address = new byte[6];
+                        Array.Copy(r, 10, this.address, 0, 6);
+                        authentication = r[18];
+                    }
+                    else if (r[5] == 1)
+                    {
+                        int length = Math.Min(r[6], r.Length - 7);
+                        name = length > 0 ? Encoding.UTF8.GetString(r, 7, length) : "";
+                    }
+                    if (this.address == null || authentication < 0 || name == null) return Output.None;
+                    PairSent = true;
+                    DeviceName = name;
+                    Phase = BoltPhase.Pairing;
+                    Outgoing = BoltPackets.Pair(this.address, (byte)authentication, (byte)(DeviceKind == 1 ? 20 : 10));
+                    return Output.Send;
+                case 0x54:      // pairing status
+                    if (address == 0x00) { LockOpen = true; return Output.None; }
+                    LockOpen = false;
+                    if (error != 0)
+                    {
+                        Phase = BoltPhase.Failed;
+                        Failure = error == 0x01 ? BoltFailure.Timeout : BoltFailure.Failed;
+                        return Output.Finished;
+                    }
+                    if (address == 0x02 && r.Length >= 12)
+                    {
+                        Succeed(r[11]);
+                        return Output.Finished;
+                    }
+                    ClosedWaiting = true;
+                    return Output.ClosedWithoutResult;
+                case 0x4D:      // passkey (6 ASCII digits)
+                    if (r.Length < 10) return Output.None;
+                    var code = new StringBuilder();
+                    for (int i = 4; i < 10; i++) if (r[i] >= (byte)'0' && r[i] <= (byte)'9') code.Append((char)r[i]);
+                    Code = code.ToString();
+                    DeviceName = name ?? "";
+                    KeyboardPasskey = (authentication & 0x01) != 0;
+                    Phase = BoltPhase.Passkey;
+                    return Output.None;
+            }
+            return Output.None;
+        }
+
+        private void Succeed(int slot)
+        {
+            Phase = BoltPhase.Succeeded;
+            PairedSlot = slot;
+            DeviceName = name ?? "";
+        }
+    }
+
+    // ---- Logi Bolt receiver (I/O) ----
+    internal sealed class BoltReceiverSnapshot
+    {
+        public bool Present;
+        public bool Multiple;       // more than one Bolt receiver plugged in: listing, pairing and unpairing are off
+        public List<BoltSlot> Slots = new List<BoltSlot>();
+        public BoltPhase Phase = BoltPhase.Idle;
+        public BoltFailure Failure = BoltFailure.None;
+        public string Code = "";
+        public string DeviceName = "";
+        public bool KeyboardPasskey;
+        public int PairedSlot = -1;
+        public bool Active
+        {
+            get { return Phase == BoltPhase.Searching || Phase == BoltPhase.Pairing || Phase == BoltPhase.Passkey; }
+        }
+    }
+
+    // Lists, pairs and unpairs devices on a Logi Bolt receiver. Opens its own handles on the receiver's short
+    // and long HID++ collections (HidppDiversionManager.BoltPort), separate from the mouse and the keyboard.
+    // Everything runs on one worker thread; requests wait for the matching reply from the reader threads.
+    // Only the receiver's own replies and notifications (device 0xFF) and, while pairing, connection notices
+    // are looked at; every other report is ignored and never logged.
+    internal sealed class BoltReceiver : IDisposable
+    {
+        private const int PairingDeadline = 120000;     // safety limit; the receiver normally reports its own timeout
+        private const int GraceMilliseconds = 3000;
+
+        private readonly Action<string> report;
+        private readonly System.Collections.Concurrent.BlockingCollection<Action> queue =
+            new System.Collections.Concurrent.BlockingCollection<Action>();
+        private readonly Thread worker;
+        private readonly System.Threading.Timer ticker;
+
+        // Worker thread only.
+        private HidppDiversionManager.BoltPort port;
+        private List<BoltSlot> slots = new List<BoltSlot>();
+        private readonly BoltPairingFlow flow = new BoltPairingFlow();
+        private int restoreFlags = -1;
+        private int deadline, grace;
+        private bool deadlineSet, graceSet;
+        private bool disposed, shuttingDown;
+        private List<int> unknownSlots = new List<int>();   // slots whose pairing info did not come back (not known to be empty)
+        private bool lastRequestRejected;                    // the last Request got an error reply (not a timeout)
+
+        private readonly object pendingLock = new object();
+        private byte[] pendingRequest, pendingReply;
+        private bool pendingFailed;
+        private readonly ManualResetEvent pendingDone = new ManualResetEvent(false);
+
+        public event Action<BoltReceiverSnapshot> Changed;
+
+        public BoltReceiver(Action<string> reportAction)
+        {
+            report = reportAction;
+            worker = new Thread(Run) { IsBackground = true, Name = "MXMasterWin Bolt" };
+            worker.Start();
+            ticker = new System.Threading.Timer(delegate { Post(Tick); }, null, 1000, 1000);
+        }
+
+        public void Refresh()
+        {
+            Post(delegate
+            {
+                EnsureOpen();
+                if (!flow.Active)
+                {
+                    RestoreFlags();
+                    ReadSlots();
+                }
+                Publish();
+            });
+        }
+
+        public void StartPairing() { Post(StartOnWorker); }
+        public void CancelPairing() { Post(CancelOnWorker); }
+
+        // The success or failure has been read; back to the normal view.
+        public void DismissResult()
+        {
+            Post(delegate
+            {
+                if (flow.Active) return;
+                flow.Reset();
+                Publish();
+            });
+        }
+
+        // done: 1 unpaired, 0 failed, 2 not sent because the slot no longer holds the expected device (the
+        // list was out of date when the user confirmed).
+        public void Unpair(BoltSlot expected, Action<int> done)
+        {
+            Post(delegate
+            {
+                int result = 0;
+                if (port != null && !port.Multiple && !flow.Active)
+                {
+                    BoltSlot now = BoltPackets.ParseSlot(expected.Slot, Request(BoltPackets.ReadPairing(expected.Slot)), null);
+                    if (now == null || now.Wpid != expected.Wpid || now.Serial != expected.Serial)
+                    {
+                        result = 2;
+                        Report("unpair slot " + expected.Slot + " skipped: the slot changed");
+                    }
+                    else
+                    {
+                        result = Request(BoltPackets.Unpair(expected.Slot)) != null ? 1 : 0;
+                        Report("unpair slot " + expected.Slot + (result == 1 ? " ok" : " failed"));
+                    }
+                    ReadSlots();
+                    Publish();
+                }
+                try { done(result); }
+                catch { }
+            });
+        }
+
+        public void Dispose()
+        {
+            ticker.Dispose();
+            // Not disposed here: if the wait below gives up, the worker may still set it later.
+            var finished = new ManualResetEvent(false);
+            Post(delegate
+            {
+                shuttingDown = true;
+                if (flow.Active) CancelOnWorker();
+                RestoreFlags();
+                disposed = true;
+                if (port != null) port.Dispose();
+                port = null;
+                finished.Set();
+            });
+            finished.WaitOne(3000);
+            queue.CompleteAdding();
+        }
+
+        private void Post(Action action)
+        {
+            try { queue.Add(action); }
+            catch (InvalidOperationException) { }
+        }
+
+        private void Run()
+        {
+            foreach (Action action in queue.GetConsumingEnumerable())
+            {
+                if (disposed) continue;
+                try { action(); }
+                catch (Exception ex) { Report("error: " + ex.Message); }
+            }
+        }
+
+        // ---- Pairing (worker thread) ----
+
+        private void StartOnWorker()
+        {
+            EnsureOpen();
+            if (port == null || port.Multiple || flow.Active) { Publish(); return; }
+            graceSet = false;
+            // Slots that could not be read count as taken, so a device there waking up is not taken for the new one.
+            var known = new List<int>(unknownSlots);
+            foreach (BoltSlot s in slots) known.Add(s.Slot);
+            flow.Begin(known);
+            int flags = BoltPackets.Flags(Request(BoltPackets.ReadFlags()));
+            if (flags < 0) { Abort("notification flags could not be read", false); return; }
+            if ((flags & BoltPackets.WirelessFlag) == 0)
+            {
+                // The restore is owed from here on, even if the reply to the write gets lost.
+                if (restoreFlags < 0) restoreFlags = flags;
+                Request(BoltPackets.WriteFlags(flags | BoltPackets.WirelessFlag));
+                int now = BoltPackets.Flags(Request(BoltPackets.ReadFlags()));
+                if (now < 0 || (now & BoltPackets.WirelessFlag) == 0) { Abort("pairing notifications could not be turned on", false); return; }
+            }
+            if (Request(BoltPackets.Discover(true)) == null) { Abort("discovery did not start", true); return; }
+            Report("pairing: searching");
+            deadline = unchecked(Environment.TickCount + PairingDeadline);
+            deadlineSet = true;
+            Publish();
+        }
+
+        private void CancelOnWorker()
+        {
+            if (!flow.Active) return;
+            foreach (byte[] packet in flow.Cancel()) Request(packet);
+            Report("pairing: cancelled");
+            Finish();
+        }
+
+        private void Notification(byte[] bytes)
+        {
+            if (!flow.Active) return;
+            BoltPhase before = flow.Phase;
+            switch (flow.Handle(bytes))
+            {
+                case BoltPairingFlow.Output.Send:
+                    Report("pairing: found " + flow.DeviceName + " (kind " + flow.DeviceKind + "); pairing");
+                    if (Request(flow.Outgoing) == null)
+                    {
+                        Abort("pair command not accepted", true);
+                        return;
+                    }
+                    break;
+                case BoltPairingFlow.Output.Finished:
+                    Finish();
+                    return;
+                case BoltPairingFlow.Output.ClosedWithoutResult:
+                    // The receiver sometimes closes the pairing state before the new device's connection notice.
+                    grace = unchecked(Environment.TickCount + GraceMilliseconds);
+                    graceSet = true;
+                    break;
+            }
+            if (flow.Phase == BoltPhase.Passkey && before != BoltPhase.Passkey)
+                Report("pairing: passkey requested (" + (flow.KeyboardPasskey ? "keyboard" : "mouse buttons") + ")");
+            Publish();
+        }
+
+        private void Tick()
+        {
+            if (!flow.Active) return;
+            int now = Environment.TickCount;
+            if (graceSet && unchecked(now - grace) >= 0)
+            {
+                flow.Fail(BoltFailure.Failed);
+                Finish();
+            }
+            else if (deadlineSet && unchecked(now - deadline) >= 0)
+            {
+                Report("pairing: gave up after " + PairingDeadline / 1000 + " s");
+                foreach (byte[] packet in flow.CleanupPackets()) Request(packet);
+                flow.Fail(BoltFailure.Timeout);
+                Finish();
+            }
+        }
+
+        // A command got no usable reply. It may have run anyway, so with cleanup the receiver is told to stop
+        // the discovery or pairing before the attempt is reported as failed.
+        private void Abort(string reason, bool cleanup)
+        {
+            Report("pairing: " + reason);
+            if (cleanup) foreach (byte[] packet in flow.CleanupPackets()) Request(packet);
+            flow.Fail(BoltFailure.NoAnswer);
+            Finish();
+        }
+
+        private void Finish()
+        {
+            deadlineSet = graceSet = false;
+            RestoreFlags();
+            if (flow.Phase == BoltPhase.Succeeded) Report("pairing: paired " + flow.DeviceName + " on slot " + flow.PairedSlot);
+            else if (flow.Phase == BoltPhase.Failed) Report("pairing: failed (" + flow.Failure + ")");
+            if (shuttingDown) return;
+            ReadSlots();
+            Publish();
+        }
+
+        // Puts the notification flags back as they were before pairing, confirmed by reading them back; on
+        // failure the restore stays owed and is tried again on the next refresh and on exit.
+        private void RestoreFlags()
+        {
+            if (restoreFlags < 0 || port == null) return;
+            for (int attempt = 0; attempt < 2; attempt++)
+            {
+                Request(BoltPackets.WriteFlags(restoreFlags));
+                if (BoltPackets.Flags(Request(BoltPackets.ReadFlags())) == restoreFlags)
+                {
+                    restoreFlags = -1;
+                    return;
+                }
+            }
+            Report("pairing: notification flags not restored yet; will retry");
+        }
+
+        // ---- Receiver and transport (worker thread) ----
+
+        private void EnsureOpen()
+        {
+            if (port != null || disposed) return;
+            port = HidppDiversionManager.BoltPort.Open(Report);
+            if (port == null) return;
+            port.Received += OnReport;
+            port.Start();
+            Report("receiver found");
+        }
+
+        private void Lost()
+        {
+            if (port == null) return;
+            Report("receiver removed");
+            port.Dispose();
+            port = null;
+            deadlineSet = graceSet = false;
+            restoreFlags = -1;
+            flow.Reset();
+            slots = new List<BoltSlot>();
+        }
+
+        private void ReadSlots()
+        {
+            var list = new List<BoltSlot>();
+            var unknown = new List<int>();
+            if (port != null && !port.Multiple)
+            {
+                for (int slot = 1; slot <= 6; slot++)
+                {
+                    byte[] pairing = Request(BoltPackets.ReadPairing(slot));
+                    if (pairing == null)
+                    {
+                        // An error reply means an empty slot; no reply at all says nothing.
+                        if (!lastRequestRejected && port != null) unknown.Add(slot);
+                        continue;
+                    }
+                    BoltSlot entry = BoltPackets.ParseSlot(slot, pairing, Request(BoltPackets.ReadName(slot)));
+                    if (entry != null) list.Add(entry);
+                }
+            }
+            slots = list;
+            unknownSlots = unknown;
+        }
+
+        private byte[] Request(byte[] packet)
+        {
+            if (port == null || packet == null) return null;
+            lock (pendingLock)
+            {
+                pendingRequest = packet;
+                pendingReply = null;
+                pendingFailed = false;
+                pendingDone.Reset();
+            }
+            if (!port.Write(packet))
+            {
+                lock (pendingLock) pendingRequest = null;
+                Lost();
+                return null;
+            }
+            pendingDone.WaitOne(1000);
+            lock (pendingLock)
+            {
+                byte[] reply = pendingFailed ? null : pendingReply;
+                lastRequestRejected = pendingFailed && pendingReply != null;
+                pendingRequest = null;
+                pendingReply = null;
+                return reply;
+            }
+        }
+
+        // Reader threads.
+        private void OnReport(byte[] bytes)
+        {
+            if (bytes == null || bytes.Length < 7 || (bytes[0] != 0x10 && bytes[0] != 0x11)) return;
+            lock (pendingLock)
+            {
+                if (pendingRequest != null && (BoltPackets.IsReply(bytes, pendingRequest) || BoltPackets.IsError(bytes, pendingRequest)))
+                {
+                    pendingFailed = BoltPackets.IsError(bytes, pendingRequest);
+                    pendingReply = bytes;
+                    pendingRequest = null;
+                    pendingDone.Set();
+                    return;
+                }
+            }
+            bool notice = bytes[1] == 0xFF
+                ? bytes[2] == 0x4D || bytes[2] == 0x4E || bytes[2] == 0x4F || bytes[2] == 0x53 || bytes[2] == 0x54
+                : bytes[2] == 0x41;
+            if (notice) Post(delegate { Notification(bytes); });
+        }
+
+        private void Publish()
+        {
+            var s = new BoltReceiverSnapshot
+            {
+                Present = port != null,
+                Multiple = port != null && port.Multiple,
+                Slots = new List<BoltSlot>(slots),
+                Phase = flow.Phase,
+                Failure = flow.Failure,
+                Code = flow.Code,
+                DeviceName = flow.DeviceName,
+                KeyboardPasskey = flow.KeyboardPasskey,
+                PairedSlot = flow.PairedSlot
+            };
+            Action<BoltReceiverSnapshot> handler = Changed;
+            if (handler != null)
+            {
+                try { handler(s); }
+                catch { }
+            }
+        }
+
+        private void Report(string text)
+        {
+            try { report(text); }
+            catch { }
+        }
+    }
+
     internal sealed class KeyboardSnapshot
     {
         public string Name = "";
@@ -7234,6 +8972,9 @@ namespace MXMasterWin
         public int BacklightLevels;          // manual brightness steps (0 .. levels-1)
         public bool BacklightAuto;
         public bool BacklightManual;
+        public int DisabledKeysMask, DisabledKeys, CurrentPlatform = -1;
+        public List<SolaarFeatures.Platform> Platforms = new List<SolaarFeatures.Platform>();
+        public int[] BacklightDelays = new int[0];
         public bool FnPresent;
         public bool FnMediaFirst = true;     // true: the top row sends media keys, hold Fn for F1-F12
         // The keyboard did not answer this time (asleep, or on another computer); the values above are
@@ -7258,12 +8999,14 @@ namespace MXMasterWin
     internal sealed class KeyboardManager : IDisposable
     {
         private const byte SoftwareId = 0x0C;
+        private bool hostNameTried;     // this connection already tried to write the channel name (under sync)
         private readonly object sync = new object();
         private readonly Action<string> report;
         private List<HidppDiversionManager.HidTransport> transports = new List<HidppDiversionManager.HidTransport>();
         private HidppDiversionManager.HidTransport transport;
         private int deviceIndex = -1;
         private readonly Dictionary<int, int> features = new Dictionary<int, int>();
+        private readonly Dictionary<int, int> featureVersions = new Dictionary<int, int>();
         private volatile bool disposed;
         private volatile bool connected;
         private volatile bool asleep;
@@ -7272,6 +9015,12 @@ namespace MXMasterWin
         // A switch asked for while the keyboard was asleep: sent as soon as it answers again, if that
         // happens before the deadline (pendingHost -1 = none).
         private volatile int pendingHost = -1;
+        // Bumped by CancelPendingSwitch: a switch that a Refresh or ChangeHost already picked up is checked
+        // against it again right before it is queued or written, so a cancel during a wait still wins.
+        private int switchGeneration;
+        // While the keyboard does not answer, look for it on the other connections at most this often
+        // (it may have come back over Bluetooth instead of Bolt); a forced refresh looks at once.
+        private const int ResearchMilliseconds = 60000;
         private int pendingUntil;
         private const int PendingMilliseconds = 60000;
         private int lastSlot = -1;              // Bolt slot the keyboard was last found on
@@ -7313,6 +9062,7 @@ namespace MXMasterWin
 
         public void CancelPendingSwitch()
         {
+            Interlocked.Increment(ref switchGeneration);
             if (pendingHost >= 0) Report("queued keyboard switch cancelled");
             pendingHost = -1;
         }
@@ -7328,11 +9078,24 @@ namespace MXMasterWin
                 {
                     if (transport == null)
                     {
-                        if (!force && unchecked(Environment.TickCount - lastSearch) < 8000) return null;
+                        if (!force && unchecked(Environment.TickCount - lastSearch) < 8000) return Kept();
                         Search(force);
-                        if (transport == null) return null;
+                        if (transport == null) return Kept();
                     }
                     KeyboardSnapshot snapshot = ReadSnapshot();
+                    if (snapshot == null && last != null &&
+                        (force || unchecked(Environment.TickCount - lastSearch) >= ResearchMilliseconds))
+                    {
+                        // It may have come back over another connection (e.g. Bluetooth instead of Bolt):
+                        // look again, keeping the last reading on screen meanwhile.
+                        KeyboardSnapshot cached = last;
+                        bool wasAsleep = asleep;
+                        Drop(null);
+                        last = cached;
+                        asleep = wasAsleep;
+                        Search(force);
+                        if (transport != null) snapshot = ReadSnapshot();
+                    }
                     if (snapshot == null)
                     {
                         // Never read it: treat it as gone. Read before: it is most likely asleep, so keep
@@ -7343,21 +9106,19 @@ namespace MXMasterWin
                             return null;
                         }
                         if (!asleep) Report("keyboard not answering (asleep or on another computer); keeping the last reading");
-                        asleep = true;
-                        KeyboardSnapshot kept = last.Copy();
-                        kept.Asleep = true;
-                        return kept;
+                        return Kept();
                     }
                     if (asleep) Report("keyboard answers again");
                     asleep = false;
                     last = snapshot;
+                    int generation = Thread.VolatileRead(ref switchGeneration);
                     int queued = pendingHost;
                     if (queued >= 0)
                     {
                         pendingHost = -1;
                         if (unchecked(pendingUntil - Environment.TickCount) <= 0)
                             Report("queued keyboard switch to " + queued + " expired");
-                        else if (queued != snapshot.CurrentHost && SendChangeHost(queued) == 1)
+                        else if (queued != snapshot.CurrentHost && SendChangeHost(queued, generation) == 1)
                             return null;     // it has left this computer
                     }
                     return snapshot;
@@ -7379,20 +9140,20 @@ namespace MXMasterWin
                 if (disposed) return false;
                 try
                 {
+                    int generation = Thread.VolatileRead(ref switchGeneration);
                     pendingHost = -1;
                     if (transport == null) Search(false);
-                    if (transport == null) return false;
-                    int result = SendChangeHost(host);
-                    if (result >= 0) return result == 1;
-                    if (asleep || last != null)
+                    if (transport == null)
                     {
-                        // Asleep (typical on Bolt): it cannot be reached until a key is pressed, so send
-                        // the switch the moment it answers again.
-                        asleep = true;
-                        pendingHost = host;
-                        pendingUntil = unchecked(Environment.TickCount + PendingMilliseconds);
-                        Report("keyboard not answering; switch to " + host + " queued for " + PendingMilliseconds / 1000 + " s");
+                        // Asleep and not found again yet (see Refresh): queue it like below.
+                        if (last != null) Queue(host, generation);
+                        return false;
                     }
+                    int result = SendChangeHost(host, generation);
+                    if (result >= 0) return result == 1;
+                    // Asleep (typical on Bolt): it cannot be reached until a key is pressed, so send
+                    // the switch the moment it answers again.
+                    if (asleep || last != null) Queue(host, generation);
                     return false;
                 }
                 catch (Exception ex)
@@ -7403,13 +9164,41 @@ namespace MXMasterWin
             }
         }
 
-        // 1 = sent (the keyboard has left), 0 = it answered but is already there or the channel is invalid,
-        // -1 = no answer.
-        private int SendChangeHost(int host)
+        private void Queue(int host, int generation)
+        {
+            if (generation != Thread.VolatileRead(ref switchGeneration))
+            {
+                Report("keyboard switch to " + host + " cancelled while waiting");
+                return;
+            }
+            asleep = true;
+            pendingHost = host;
+            pendingUntil = unchecked(Environment.TickCount + PendingMilliseconds);
+            Report("keyboard not answering; switch to " + host + " queued for " + PendingMilliseconds / 1000 + " s");
+        }
+
+        // The last reading, marked asleep (null when there is none).
+        private KeyboardSnapshot Kept()
+        {
+            if (last == null) return null;
+            asleep = true;
+            KeyboardSnapshot kept = last.Copy();
+            kept.Asleep = true;
+            return kept;
+        }
+
+        // 1 = sent (the keyboard has left), 0 = it answered but is already there, the channel is invalid or
+        // the switch was cancelled meanwhile, -1 = no answer.
+        private int SendChangeHost(int host, int generation)
         {
             byte[] info = CallTimed(0x1814, 0, FirstCallTimeout);
             if (info == null) return -1;
             if (host < 0 || host >= info[4] || host == info[5]) return 0;
+            if (generation != Thread.VolatileRead(ref switchGeneration))
+            {
+                Report("keyboard switch to " + host + " cancelled while waiting");
+                return 0;
+            }
             Report("change host " + info[5] + " -> " + host);
             try { CallTimed(0x1814, 1, 300, (byte)host); }
             catch (Exception ex) { Report("change host: " + ex.Message); }
@@ -7443,6 +9232,64 @@ namespace MXMasterWin
                     Report("backlight write failed: " + ex.Message);
                     return false;
                 }
+            }
+        }
+
+        public bool SetDisabledKey(int bit, bool disabled)
+        {
+            lock (sync)
+            {
+                if (disposed || transport == null) return false;
+                try
+                {
+                    byte[] p = SolaarFeatures.DisabledKey(Call(0x4521, 0), Call(0x4521, 1), bit, disabled);
+                    return p != null && Call(0x4521, 2, p) != null && SolaarFeatures.Matches(Call(0x4521, 1), p);
+                }
+                catch { return false; }
+            }
+        }
+        private List<SolaarFeatures.Platform> ReadPlatforms(byte[] info)
+        {
+            var descriptors = new List<byte[]>();
+            if (info == null || info.Length < 11 || (info[4] & 2) == 0) return new List<SolaarFeatures.Platform>();
+            for (int i = 0; i < info[6]; i++)
+            {
+                byte[] descriptor = Call(0x4531, 1, (byte)i);
+                if (descriptor == null) return new List<SolaarFeatures.Platform>();
+                descriptors.Add(descriptor);
+            }
+            return SolaarFeatures.Platforms(descriptors);
+        }
+        public bool SetPlatform(int value)
+        {
+            lock (sync)
+            {
+                if (disposed || transport == null) return false;
+                try
+                {
+                    byte[] host = Call(0x1814, 0), info = Call(0x4531, 0);
+                    byte[] p = SolaarFeatures.PlatformWrite(info, ReadPlatforms(info), value);
+                    if (host == null || p == null || Call(0x4531, 3, p) == null) return false;
+                    byte[] after = Call(0x1814, 0);
+                    return after != null && SolaarFeatures.PlatformMatches(Call(0x4531, 0), value, host[5], after[5]);
+                }
+                catch { return false; }
+            }
+        }
+        public bool SetBacklightDelay(int field, int seconds)
+        {
+            lock (sync)
+            {
+                if (disposed || transport == null) return false;
+                try
+                {
+                    byte[] r = Call(0x1982, 0);
+                    int version;
+                    featureVersions.TryGetValue(0x1982, out version);
+                    byte[] p = SolaarFeatures.BacklightDelay(r, version, field, seconds);
+                    return p != null && Call(0x1982, 1, p) != null && SolaarFeatures.BacklightMatches(Call(0x1982, 0), p);
+                }
+                catch { return false; }
             }
         }
 
@@ -7493,7 +9340,7 @@ namespace MXMasterWin
                 {
                     transport = candidate;
                     deviceIndex = slot;
-                    features.Clear();
+                    features.Clear(); featureVersions.Clear();
                     byte[] type = null;
                     try
                     {
@@ -7517,6 +9364,7 @@ namespace MXMasterWin
                         connected = true;
                         last = null;
                         if (candidate.IsBolt) lastSlot = slot;
+                        hostNameTried = false;
                         Report("keyboard found on " + candidate.Name + " dev=" + slot.ToString("X2"));
                         return;
                     }
@@ -7524,7 +9372,7 @@ namespace MXMasterWin
             }
             transport = null;
             deviceIndex = -1;
-            features.Clear();
+            features.Clear(); featureVersions.Clear();
             CloseTransports();
         }
 
@@ -7533,7 +9381,7 @@ namespace MXMasterWin
             if (reason != null && transport != null) Report(reason);
             transport = null;
             deviceIndex = -1;
-            features.Clear();
+            features.Clear(); featureVersions.Clear();
             connected = false;
             asleep = false;
         }
@@ -7571,6 +9419,11 @@ namespace MXMasterWin
                 }
                 s.Hosts.Add(entry);
             }
+            if (!hostNameTried && s.CurrentHost >= 0 && s.CurrentHost < s.Hosts.Count)
+            {
+                string written = WriteHostName(s.CurrentHost, s.Hosts[s.CurrentHost].Name);
+                if (written != null) s.Hosts[s.CurrentHost].Name = written;
+            }
             byte[] count = Call(0x0005, 0);
             if (count != null) s.Name = ReadText(Math.Min((int)count[4], 64), delegate(int offset) { return Call(0x0005, 1, (byte)offset); }, 4);
             byte[] battery = Call(0x1004, 1);
@@ -7603,6 +9456,20 @@ namespace MXMasterWin
                 byte[] levels = Call(0x1982, 2);
                 if (levels != null) s.BacklightLevels = levels[4];
             }
+            byte[] disableCaps = Call(0x4521, 0), disabled = Call(0x4521, 1);
+            if (disableCaps != null && disabled != null)
+            {
+                s.DisabledKeysMask = disableCaps[4]; s.DisabledKeys = disabled[4];
+            }
+            byte[] platform = Call(0x4531, 0);
+            if (platform != null)
+            {
+                s.Platforms = ReadPlatforms(platform); s.CurrentPlatform = platform[10];
+            }
+            int backlightVersion;
+            featureVersions.TryGetValue(0x1982, out backlightVersion);
+            if (light != null && light.Length >= 16 && backlightVersion >= 3)
+                s.BacklightDelays = new int[] { SolaarFeatures.Duration(light, 0), SolaarFeatures.Duration(light, 1), SolaarFeatures.Duration(light, 2) };
             byte[] fn = Call(0x40A3, 0, 0xFF);
             if (fn != null)
             {
@@ -7615,6 +9482,40 @@ namespace MXMasterWin
         }
 
         // Reads a string that the device hands out in pieces starting at byte `start` of each reply.
+        // The current channel's name differs from this computer: write this computer's name (see HostName),
+        // confirmed by reading it back; tried once per connection.
+        private string WriteHostName(int current, string stored)
+        {
+            hostNameTried = true;
+            string computer = HostName.ComputerName;
+            byte[] caps = Call(0x1815, 0);
+            byte[] info = Call(0x1815, 1, (byte)current);
+            if (caps == null || info == null || !HostName.NeedsWrite(caps[4], stored, computer, info[9])) return null;
+            string fitted = Encoding.UTF8.GetString(HostName.Encode(computer, info[9]));
+            foreach (byte[] packet in HostName.WritePackets(current, HostName.Encode(computer, info[9])))
+            {
+                if (Call(0x1815, 4, packet) == null)
+                {
+                    Report("host name write failed");
+                    return null;
+                }
+            }
+            byte[] after = Call(0x1815, 1, (byte)current);
+            if (after == null) return null;
+            var name = new List<byte>();
+            while (name.Count < after[8])
+            {
+                byte[] piece = Call(0x1815, 3, (byte)current, (byte)name.Count);
+                if (piece == null) break;
+                int take = Math.Min(after[8] - name.Count, Math.Min(14, piece.Length - 6));
+                if (take <= 0) break;
+                for (int k = 0; k < take; k++) name.Add(piece[6 + k]);
+            }
+            string now = Encoding.UTF8.GetString(name.ToArray());
+            Report("host name of channel " + (current + 1) + " written: " + (HostName.Same(now, fitted) ? "confirmed" : "not confirmed"));
+            return now;
+        }
+
         private static string ReadText(int length, Func<int, byte[]> piece, int start)
         {
             var bytes = new List<byte>();
@@ -7637,6 +9538,7 @@ namespace MXMasterWin
             if (root == null) return -1;      // no answer: ask again next time
             int index = root[4] == 0 ? -1 : root[4];
             features[feature] = index;
+            featureVersions[feature] = root.Length >= 7 ? root[6] : 0;
             return index;
         }
 
@@ -7681,6 +9583,8 @@ namespace MXMasterWin
         public int DpiFeature, Dpi, DpiDefault, DpiMin, DpiMax, DpiStep;
         public int SmartShiftFeature, WheelMode, SmartShiftThreshold;
         public bool WheelInvertPresent, WheelInverted;
+        public bool TorquePresent, ThumbInvertPresent, ThumbInverted, HiresResolution;
+        public int RatchetTorque;
         public bool HapticPresent;
         public int HapticLevel;
         public readonly List<string> Raw = new List<string>();
@@ -7703,6 +9607,7 @@ namespace MXMasterWin
         public int WheelMode = -1;
         public int SmartShiftThreshold = -1;
         public int WheelInvert = -1;
+        public int RatchetTorque = -1, ThumbInvert = -1, HiresResolution = -1;
         public int Haptic = -1;
 
         public bool TryLoad(string key, string text)
@@ -7726,6 +9631,18 @@ namespace MXMasterWin
             {
                 if (value == 0 || value == 1) WheelInvert = value;
             }
+            else if (key.Equals("DeviceRatchetTorque", StringComparison.OrdinalIgnoreCase))
+            {
+                if (value >= 1 && value <= 100) RatchetTorque = value;
+            }
+            else if (key.Equals("DeviceThumbInvert", StringComparison.OrdinalIgnoreCase))
+            {
+                if (value == 0 || value == 1) ThumbInvert = value;
+            }
+            else if (key.Equals("DeviceHiresResolution", StringComparison.OrdinalIgnoreCase))
+            {
+                if (value == 0 || value == 1) HiresResolution = value;
+            }
             else if (key.Equals("DeviceHaptic", StringComparison.OrdinalIgnoreCase))
             {
                 if (value >= 0 && value <= 100) Haptic = value;
@@ -7740,6 +9657,9 @@ namespace MXMasterWin
             if (WheelMode > 0) lines.Add("DeviceWheelMode=" + WheelMode);
             if (SmartShiftThreshold > 0) lines.Add("DeviceSmartShift=" + SmartShiftThreshold);
             if (WheelInvert >= 0) lines.Add("DeviceWheelInvert=" + WheelInvert);
+            if (RatchetTorque > 0) lines.Add("DeviceRatchetTorque=" + RatchetTorque);
+            if (ThumbInvert >= 0) lines.Add("DeviceThumbInvert=" + ThumbInvert);
+            if (HiresResolution >= 0) lines.Add("DeviceHiresResolution=" + HiresResolution);
             if (Haptic >= 0) lines.Add("DeviceHaptic=" + Haptic);
             return lines;
         }
@@ -7773,6 +9693,21 @@ namespace MXMasterWin
                 results.Add("restore wheel invert " + WheelInvert + " verified=" + hidpp.SetWheelInvert(WheelInvert == 1));
                 wrote = true;
             }
+            if (RatchetTorque > 0 && s.TorquePresent && s.RatchetTorque != RatchetTorque)
+            {
+                results.Add("restore torque " + RatchetTorque + " verified=" + hidpp.SetRatchetTorque(RatchetTorque));
+                wrote = true;
+            }
+            if (ThumbInvert >= 0 && s.ThumbInvertPresent && s.ThumbInverted != (ThumbInvert == 1))
+            {
+                results.Add("restore thumb invert " + ThumbInvert + " verified=" + hidpp.SetThumbInvert(ThumbInvert == 1));
+                wrote = true;
+            }
+            if (HiresResolution >= 0 && s.WheelInvertPresent && s.HiresResolution != (HiresResolution == 1))
+            {
+                results.Add("restore high resolution " + HiresResolution + " verified=" + hidpp.SetHiresResolution(HiresResolution == 1));
+                wrote = true;
+            }
             if (Haptic >= 0 && s.HapticPresent && s.HapticLevel != Haptic)
             {
                 results.Add("restore haptic " + Haptic + " verified=" + hidpp.SetHaptic(Haptic));
@@ -7799,6 +9734,11 @@ namespace MXMasterWin
         private readonly CheckBox neverDisengage = new CheckBox();
         private readonly Label result = new Label();
         private readonly ComboBox wheelDirection = new ComboBox();
+        private readonly Panel torqueRow = new Panel();
+        private readonly SliderBar torque = new SliderBar();
+        private readonly Label torqueValue = new Label();
+        private readonly CheckBox thumbInvert = new ToggleSwitch(), hiresResolution = new ToggleSwitch();
+        private bool fillingFeatures, featureBusy;
         private readonly Button dpiApply, shiftApply, directionApply, reload, close;
         private readonly float scale;
         private DeviceSnapshot current;
@@ -7819,24 +9759,28 @@ namespace MXMasterWin
             saved = savedSettings;
             save = saveAction;
             scale = Theme.GetScale();
-            DialogStyle.Apply(this, Lang.T("裝置設定", "Device settings"), 480, 424, scale);
+            DialogStyle.Apply(this, Lang.T("裝置設定", "Device settings"), 480, 484, scale);
 
-            AddInfoRow(Lang.T("連線", "Connection"), connection, 12);
-            AddInfoRow(Lang.T("電量", "Battery"), battery, 36);
-            AddInfoRow(Lang.T("韌體", "Firmware"), firmware, 60);
+            // Layout: connection / battery / firmware in three columns, then the speed, then the wheel rows
+            // (label column, control column at x=150, Apply at x=380); the optional wheel features follow
+            // and are stacked by LayoutExtras so unsupported ones leave no gap.
+            AddInfoColumn(Lang.T("連線", "Connection"), connection, 0);
+            AddInfoColumn(Lang.T("電量", "Battery"), battery, 1);
+            AddInfoColumn(Lang.T("韌體", "Firmware"), firmware, 2);
+            AddDividerLine(56);
 
-            AddSection(Lang.T("指標速度（DPI）", "Pointer speed (DPI)"), 94);
-            dpi.Location = new Point(S(14), S(120));
+            AddSection(Lang.T("指標速度（DPI）", "Pointer speed (DPI)"), 66);
+            dpi.Location = new Point(S(14), S(92));
             dpi.Size = new Size(S(270), S(30));
             dpi.ValueChanged += delegate { dpiValue.Text = dpi.Value + " DPI"; };
             Controls.Add(dpi);
-            AddValueLabel(dpiValue, 120);
+            AddValueLabel(dpiValue, 92);
             dpiRange.AutoSize = true;
             dpiRange.ForeColor = Theme.Muted;
             dpiRange.Font = new Font(Theme.UiFont, 8.5F);
-            dpiRange.Location = new Point(S(20), S(149));
+            dpiRange.Location = new Point(S(20), S(121));
             Controls.Add(dpiRange);
-            dpiApply = AddApply(120);
+            dpiApply = AddApply(92);
             dpiApply.Click += delegate
             {
                 DeviceSnapshot s = current;
@@ -7853,23 +9797,25 @@ namespace MXMasterWin
                     });
             };
 
-            AddSection(Lang.T("滾輪", "Wheel"), 180);
+            AddDividerLine(146);
+            AddSection(Lang.T("滾輪", "Wheel"), 156);
+            AddRowLabel(Lang.T("模式", "Mode"), 184);
             wheelMode.DropDownStyle = ComboBoxStyle.DropDownList;
             wheelMode.Items.Add(Lang.T("段落滾動（Ratchet）", "Ratchet"));
             wheelMode.Items.Add(Lang.T("自由滾動（Free spin）", "Free spin"));
-            wheelMode.Location = new Point(S(20), S(208));
-            wheelMode.Width = S(200);
+            wheelMode.Location = new Point(S(150), S(184));
+            wheelMode.Width = S(210);
             Controls.Add(wheelMode);
-            shiftApply = AddApply(206);
-            Controls.Add(new Label { Text = Lang.T("自動切換靈敏度", "Auto-shift sensitivity"), AutoSize = true, Location = new Point(S(20), S(247)) });
+            shiftApply = AddApply(182);
+            AddRowLabel(Lang.T("自動切換靈敏度", "Auto-shift sensitivity"), 218);
             threshold.Minimum = 1;
             threshold.Maximum = 50;
-            threshold.Location = new Point(S(150), S(244));
+            threshold.Location = new Point(S(150), S(218));
             threshold.Width = S(70);
             Controls.Add(threshold);
             neverDisengage.Text = Lang.T("不自動切換", "Never auto-shift");
             neverDisengage.AutoSize = true;
-            neverDisengage.Location = new Point(S(236), S(245));
+            neverDisengage.Location = new Point(S(236), S(219));
             neverDisengage.CheckedChanged += delegate { threshold.Enabled = !neverDisengage.Checked; };
             Controls.Add(neverDisengage);
             shiftApply.Click += delegate
@@ -7880,17 +9826,17 @@ namespace MXMasterWin
                     delegate { saved.WheelMode = mode; saved.SmartShiftThreshold = value; });
             };
 
-            Controls.Add(new Label { Text = Lang.T("捲動方向", "Scroll direction"), AutoSize = true, Location = new Point(S(20), S(283)) });
+            AddRowLabel(Lang.T("捲動方向", "Scroll direction"), 252);
             wheelDirection.DropDownStyle = ComboBoxStyle.DropDownList;
             // Index 0 is the mouse's own direction, index 1 the inverted one. Windows does not flip
             // scrolling itself, so the device direction is "standard" and the inverted one "natural"
             // (on macOS, where the system flips it, the two names are the other way round).
             wheelDirection.Items.Add(Lang.T("標準", "Standard"));
             wheelDirection.Items.Add(Lang.T("自然", "Natural"));
-            wheelDirection.Location = new Point(S(150), S(280));
+            wheelDirection.Location = new Point(S(150), S(252));
             wheelDirection.Width = S(210);
             Controls.Add(wheelDirection);
-            directionApply = AddApply(278);
+            directionApply = AddApply(250);
             directionApply.Click += delegate
             {
                 bool inverted = wheelDirection.SelectedIndex == 1;
@@ -7898,20 +9844,51 @@ namespace MXMasterWin
                     delegate { saved.WheelInvert = inverted ? 1 : 0; });
             };
 
+            torqueRow.Bounds = new Rectangle(S(20), S(284), S(440), S(32));
+            torqueRow.Visible = false; Controls.Add(torqueRow);
+            torqueRow.Controls.Add(new Label { Text = Lang.T("段落力道", "Ratchet torque"), AutoSize = false, TextAlign = ContentAlignment.MiddleLeft,
+                Bounds = new Rectangle(0, S(1), S(126), S(28)) });
+            torque.Minimum = 1; torque.Maximum = 100; torque.Bounds = new Rectangle(S(124), S(2), S(176), S(26));
+            torque.ValueChanged += delegate { torqueValue.Text = torque.Value.ToString(); };
+            torqueRow.Controls.Add(torque);
+            torqueValue.AutoSize = false; torqueValue.TextAlign = ContentAlignment.MiddleCenter; torqueValue.Font = new Font(Theme.UiFont, 9.5F, FontStyle.Bold);
+            torqueValue.Bounds = new Rectangle(S(300), S(1), S(52), S(28)); torqueRow.Controls.Add(torqueValue);
+            Button torqueApply = Theme.CreateButton(Lang.T("套用", "Apply"), false);
+            torqueApply.Bounds = new Rectangle(S(360), 0, S(80), S(30)); torqueRow.Controls.Add(torqueApply);
+            torqueApply.Click += delegate
+            {
+                int value = torque.Value;
+                RunWrite(Lang.T("段落力道", "Ratchet torque"), delegate { return hidpp.SetRatchetTorque(value); }, delegate { saved.RatchetTorque = value; });
+            };
+            thumbInvert.Text = Lang.T("拇指滾輪方向反轉", "Invert thumb wheel");
+            thumbInvert.Bounds = new Rectangle(S(20), S(320), S(440), S(28)); thumbInvert.Visible = false; Controls.Add(thumbInvert);
+            thumbInvert.Click += delegate
+            {
+                if (fillingFeatures || featureBusy) return; bool value = thumbInvert.Checked;
+                RunWrite(thumbInvert.Text, delegate { return hidpp.SetThumbInvert(value); }, delegate { saved.ThumbInvert = value ? 1 : 0; });
+            };
+            hiresResolution.Text = Lang.T("主滾輪高解析度（捲動可能變快）", "High resolution wheel (may scroll faster)");
+            hiresResolution.Bounds = new Rectangle(S(20), S(352), S(440), S(28)); hiresResolution.Visible = false; Controls.Add(hiresResolution);
+            hiresResolution.Click += delegate
+            {
+                if (fillingFeatures || featureBusy) return; bool value = hiresResolution.Checked;
+                RunWrite(hiresResolution.Text, delegate { return hidpp.SetHiresResolution(value); }, delegate { saved.HiresResolution = value ? 1 : 0; });
+            };
+
             // Haptic strength moved to its own page with the haptic moments.
             result.AutoSize = false;
             result.ForeColor = Theme.Muted;
-            result.Location = new Point(S(20), S(326));
-            result.Size = new Size(S(440), S(40));
+            result.Location = new Point(S(20), S(406));
+            result.Size = new Size(S(440), S(32));
             Controls.Add(result);
 
             reload = Theme.CreateButton(Lang.T("重新讀取", "Reload"), false);
-            reload.Location = new Point(S(250), S(374));
+            reload.Location = new Point(S(250), S(442));
             reload.Size = new Size(S(100), S(34));
             reload.Click += delegate { Reload(); };
             Controls.Add(reload);
             close = Theme.CreateButton(Lang.T("關閉", "Close"), false);
-            close.Location = new Point(S(360), S(374));
+            close.Location = new Point(S(360), S(442));
             close.Size = new Size(S(100), S(34));
             close.Click += delegate { Close(); };
             Controls.Add(close);
@@ -7925,12 +9902,38 @@ namespace MXMasterWin
             return (int)Math.Round(value * scale);
         }
 
-        private void AddInfoRow(string name, Label value, int y)
+        // Muted name over the value, three columns across (like the Keyboard page).
+        private void AddInfoColumn(string name, Label value, int column)
         {
-            Controls.Add(new Label { Text = name, AutoSize = true, ForeColor = Theme.Muted, Location = new Point(S(20), S(y)) });
-            value.AutoSize = true;
-            value.Location = new Point(S(112), S(y));
+            int x = 20 + column * 150;
+            Controls.Add(new Label { Text = name, AutoSize = false, ForeColor = Theme.Muted, Font = new Font(Theme.UiFont, 9F),
+                Bounds = new Rectangle(S(x), S(6), S(140), S(18)) });
+            value.AutoSize = false;
+            value.AutoEllipsis = true;
+            value.UseMnemonic = false;
+            value.Font = new Font(Theme.UiFont, 9.5F, FontStyle.Bold);
+            value.Bounds = new Rectangle(S(x), S(26), S(column == 2 ? 140 : 145), S(22));
             Controls.Add(value);
+        }
+
+        private void AddRowLabel(string text, int y)
+        {
+            Controls.Add(new Label { Text = text, AutoSize = false, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft,
+                Bounds = new Rectangle(S(20), S(y - 1), S(128), S(28)) });
+        }
+
+        private void AddDividerLine(int y)
+        {
+            Controls.Add(new Panel { BackColor = Theme.Divider, Bounds = new Rectangle(S(20), S(y), S(440), 1) });
+        }
+
+        // Ratchet torque, thumb-wheel inversion and high resolution, stacked from y=284 with no gaps.
+        private void LayoutExtras(bool torqueShown, bool thumbShown, bool hiresShown)
+        {
+            int y = 284;
+            if (torqueShown) { torqueRow.Top = S(y); y += 38; }
+            if (thumbShown) { thumbInvert.Top = S(y); y += 34; }
+            if (hiresShown) hiresResolution.Top = S(y);
         }
 
         private void AddSection(string title, int y)
@@ -7966,6 +9969,8 @@ namespace MXMasterWin
 
         private void SetBusy(string message)
         {
+            featureBusy = true;
+            torqueRow.Enabled = thumbInvert.Enabled = hiresResolution.Enabled = false;
             dpiApply.Enabled = shiftApply.Enabled = directionApply.Enabled = reload.Enabled = false;
             result.Text = message;
         }
@@ -7987,8 +9992,8 @@ namespace MXMasterWin
             FormBorderStyle = FormBorderStyle.None;
             BackColor = Theme.Card;
             close.Visible = false;
-            result.Size = new Size(S(330), S(40));
-            reload.Location = new Point(S(360), S(328));
+            result.Size = new Size(S(330), S(32));
+            reload.Location = new Point(S(360), S(406));
             ClientSize = new Size(S(480), S(444));
             Location = location;
             host.Controls.Add(this);
@@ -8035,6 +10040,19 @@ namespace MXMasterWin
         private void ShowSnapshot(DeviceSnapshot s, string message)
         {
             current = s;
+            featureBusy = false;
+            fillingFeatures = true;
+            bool torqueShown = s != null && s.TorquePresent, thumbShown = s != null && s.ThumbInvertPresent, hiresShown = s != null && s.WheelInvertPresent;
+            torqueRow.Visible = torqueRow.Enabled = torqueShown;
+            thumbInvert.Visible = thumbInvert.Enabled = thumbShown;
+            hiresResolution.Visible = hiresResolution.Enabled = hiresShown;
+            LayoutExtras(torqueShown, thumbShown, hiresShown);
+            if (s != null)
+            {
+                if (s.TorquePresent) torque.Value = Math.Max(1, Math.Min(100, s.RatchetTorque));
+                thumbInvert.Checked = s.ThumbInverted; hiresResolution.Checked = s.HiresResolution;
+            }
+            fillingFeatures = false;
             reload.Enabled = true;
             result.Text = message;
             if (s == null)
@@ -8117,6 +10135,28 @@ namespace MXMasterWin
         }
 
         // The mouse sent something; after a pause that may mean it came back from another host.
+        // A Bolt receiver also carries the keyboard (and Options+ talking to it). With the mouse on Bolt only
+        // HID++ reports from its slot count as mouse activity; otherwise typing or a keyboard read made the
+        // mouse check run against a sleeping mouse. With the mouse on Bluetooth its index is 0xFF, the same
+        // as the receiver's own, so nothing from the receiver counts (the mouse's raw mouse input still does).
+        internal static bool CountsAsMouse(string transport, int mouseSlot, byte[] bytes)
+        {
+            if (transport != "BOLT" || mouseSlot <= 0) return true;
+            if (mouseSlot > 6) return false;
+            bool hidpp = bytes.Length >= 3 && (bytes[0] == 0x10 || bytes[0] == 0x11);
+            return hidpp && bytes[1] == mouseSlot;
+        }
+
+        // Hex for the engineering log, with Bolt pairing data hidden: the passkey (0x4D), the discovered
+        // device's address (0x4F) and paired devices' serial numbers (register 0x2B5).
+        internal static string LogHex(byte[] bytes)
+        {
+            if (bytes.Length >= 4 && (bytes[0] == 0x10 || bytes[0] == 0x11) && bytes[1] == 0xFF &&
+                (bytes[2] == 0x4D || bytes[2] == 0x4F || (bytes[2] == 0x83 && bytes[3] == 0xB5)))
+                return BitConverter.ToString(bytes, 0, 4) + " (Bolt pairing data hidden)";
+            return BitConverter.ToString(bytes);
+        }
+
         private void NoteMouseInput()
         {
             int now = Environment.TickCount;
@@ -8221,15 +10261,10 @@ namespace MXMasterWin
                     int total = (int)Math.Min(bytesPerReport * reportCount, 128);
                     byte[] bytes = new byte[total];
                     Marshal.Copy(new IntPtr(hidPtr.ToInt64() + 8), bytes, 0, total);
-                    report(transport + " HID size=" + bytesPerReport + " count=" + reportCount + " hex=" + BitConverter.ToString(bytes));
+                    report(transport + " HID size=" + bytesPerReport + " count=" + reportCount + " hex=" + LogHex(bytes));
 
-                    // A Bolt receiver also carries the keyboard (and Options+ talking to it). Once the mouse's
-                    // slot is known, only HID++ reports from that slot count as mouse activity; otherwise
-                    // typing or a keyboard read made the mouse check run against a sleeping mouse.
-                    int mouseSlot = divertedDeviceIndex;
                     bool hidpp = bytes.Length >= 3 && (bytes[0] == 0x10 || bytes[0] == 0x11);
-                    if (transport != "BOLT" || mouseSlot <= 0 || (hidpp && bytes[1] == mouseSlot))
-                        NoteMouseInput();
+                    if (CountsAsMouse(transport, divertedDeviceIndex, bytes)) NoteMouseInput();
                     // Short HID++ reports from the receiver (connection notices, errors) go to the keyboard side.
                     if (transport == "BOLT" && hidpp && bytes[0] == 0x10 && bytes.Length >= 7 && boltShortReport != null)
                         boltShortReport(bytes);

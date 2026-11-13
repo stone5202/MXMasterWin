@@ -4,6 +4,24 @@
   <a href="CHANGELOG.md">繁體中文</a> · <strong>English</strong>
 </p>
 
+## 2.4 — 2026-11-14
+
+- New Receiver page (between Keyboard and Advanced): pair a new mouse or keyboard with a Logi Bolt receiver (including the passkey typed on a keyboard or clicked on a mouse), list the paired devices and unpair them, without installing Logi Bolt or Logi Options+.
+- When the channel a mouse or keyboard uses for this computer stores a different name (a channel paired through Logi Bolt is stored as "Logitech Bolt receiver", for one), this computer's name is written to the device, so MX Flow shows the right computer and the keyboard-follows matching is more accurate (as Logi Options+ does; only the current channel is written).
+- Opening the MX Flow page reads the channel names again (before, only when the mouse connected).
+- Pointer & Wheel adds ratchet torque (1–100) when the device advertises support; confirmed values are saved and restored after reconnecting.
+- The Keyboard page adds individual switches for the keys the device can disable, preserving other key states and confirming changes by reading back.
+- The Keyboard page adds the OS layout for the current Easy-Switch channel, using the platform list reported by the device and confirming changes by reading back.
+- Backlight v3 adds hands-away, hands-near and external-power delays (1–600 seconds, rounded up to 5-second units), preserving other backlight fields and confirming changes by reading back.
+- Pointer & Wheel adds device-side thumb-wheel inversion, preserving the existing left/right action mappings; confirmed values are saved and restored after reconnecting.
+- Pointer & Wheel adds high resolution for the main wheel (scrolling may become faster), preserving other mode bits; confirmed values are saved and restored after reconnecting.
+- Layout: the Keyboard page's sub-pages use a segmented control, and every row has its title and hint on the left and the setting on the right, stacked from the top with only what the keyboard supports; disabling keys uses switches in two columns. Pointer & Wheel shows connection, battery and firmware in three columns with the wheel settings aligned, and thumb-wheel inversion and high resolution are switches. On the Receiver page the paired devices sit right under the pairing hints while no pairing is going on.
+- One more item in the sidebar, so the items sit slightly closer together.
+- Fix: with "Switch the keyboard with the mouse" turned off, a switch queued while the keyboard slept could still happen. Turning it off now cancels it, and a cancel during the wait also wins.
+- Fix: a keyboard that slept on Logi Bolt and came back over Bluetooth stayed "asleep" in the app. While it does not answer, the other connections are searched again every 60 seconds (at once on Reload), keeping the last reading meanwhile.
+- Fix: with the mouse on Bluetooth and the keyboard on a Logi Bolt receiver, keyboard traffic could still count as mouse activity and make the app check a sleeping mouse.
+- The engineering log no longer writes Logi Bolt pairing passkeys, device addresses or serial numbers.
+
 ## 2.3.1 — 2026-11-14
 
 - Fix: a keyboard on a Logi Bolt receiver sleeps after a while idle, and the Keyboard page and the bottom-left corner then lost it for a while. The last reading is now kept and marked as not answering, and it comes back as soon as a key is pressed.
