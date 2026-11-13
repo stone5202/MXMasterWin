@@ -60,7 +60,7 @@ namespace MXMasterWin
             }
         }
 
-        internal const string Version = "2.3";
+        internal const string Version = "2.3.1";
 
         // Set before closing the main window to start the app again (used after a language change).
         internal static bool RestartRequested;
@@ -2042,6 +2042,7 @@ namespace MXMasterWin
         private KeyboardSnapshot keyboardSnapshot;
         private int keyboardBusy;
         private readonly System.Windows.Forms.Timer keyboardTimer = new System.Windows.Forms.Timer();
+        private readonly System.Windows.Forms.Timer keyboardSoon = new System.Windows.Forms.Timer();
         private readonly System.Windows.Forms.Timer keyboardLevelApply = new System.Windows.Forms.Timer();
         private readonly Label keyboardName = new Label();
         // The keyboard's name in bold; the longer not-found explanation in a lighter, smaller hint style.
@@ -2204,7 +2205,7 @@ namespace MXMasterWin
                 try { BeginInvoke(new Action(ShowWindow)); }
                 catch { }
             };
-            rawInput = new RawInputMonitor(this.Handle, AppendRawEvent, OnVendorButton, OnMouseActivity, OnMxMouseMove);
+            rawInput = new RawInputMonitor(this.Handle, AppendRawEvent, OnVendorButton, OnMouseActivity, OnMxMouseMove, OnBoltShortReport);
             hidpp = new HidppDiversionManager(OnHidppStatus, OnHidppReady);
             keyboard = new KeyboardManager(OnKeyboardReport);
             MouseHook.MouseEvent += OnMouseEvent;
@@ -2259,9 +2260,23 @@ namespace MXMasterWin
             keyboardTimer.Interval = 10000;
             keyboardTimer.Tick += delegate
             {
-                if (!keyboard.Connected || pages[6].Visible) RefreshKeyboard(false);
+                // A switch waiting for a sleeping keyboard is checked often so it goes as soon as a key
+                // wakes it; otherwise every 10 seconds while there is no keyboard, it is asleep, or its
+                // page is open.
+                bool pending = keyboard.PendingSwitch;
+                int interval = pending ? 1500 : 10000;
+                if (keyboardTimer.Interval != interval) keyboardTimer.Interval = interval;
+                if (pending || !keyboard.Connected || keyboard.Asleep || pages[6].Visible) RefreshKeyboard(false);
             };
             keyboardTimer.Start();
+            // Read the keyboard shortly after the Bolt receiver says it connected (back from another
+            // computer, or woken by a key), instead of waiting for the next 10-second tick.
+            keyboardSoon.Interval = 700;
+            keyboardSoon.Tick += delegate
+            {
+                keyboardSoon.Stop();
+                RefreshKeyboard(true);
+            };
             RefreshKeyboard(true);
             if (capture) ShowDiagnostics();
             if (!show && !trayHintShown)
@@ -3219,7 +3234,8 @@ namespace MXMasterWin
                 keyboardName.Text = kb == null
                     ? Lang.T("沒有偵測到連到這台電腦的 Logitech 鍵盤（切到別台、睡眠時也會這樣；按一下鍵盤再重新讀取）",
                         "No Logitech keyboard on this computer (also while elsewhere or asleep; press a key and reload)")
-                    : (kb.Name.Length == 0 ? Lang.T("Logitech 鍵盤", "Logitech keyboard") : kb.Name);
+                    : (kb.Name.Length == 0 ? Lang.T("Logitech 鍵盤", "Logitech keyboard") : kb.Name) +
+                      (kb.Asleep ? Lang.T("　沒有回應（休眠中或在別台電腦，按一下鍵盤就會恢復）", "  not answering (asleep or elsewhere; press a key)") : "");
                 keyboardName.Font = kb == null ? keyboardMissingFont : keyboardNameFont;
                 if (kb == null) keyboardName.ForeColor = Theme.Muted;
                 else keyboardName.ResetForeColor();
@@ -3243,9 +3259,10 @@ namespace MXMasterWin
                     keyboardBacklightChoices.Add(-1);
                     keyboardBacklight.SelectedIndex = keyboardBacklightChoices.IndexOf(kb.BacklightEnabled ? kb.BacklightMode : -1);
                 }
-                keyboardBacklight.Enabled = kb != null && kb.BacklightPresent;
+                keyboardBacklight.Enabled = kb != null && kb.BacklightPresent && !kb.Asleep;   // writes cannot reach a sleeping keyboard
                 bool manual = kb != null && kb.BacklightPresent && kb.BacklightEnabled && kb.BacklightMode == 3 && kb.BacklightLevels > 1;
                 keyboardLevelLabel.Visible = keyboardLevel.Visible = keyboardLevelValue.Visible = manual;
+                keyboardLevel.Enabled = kb != null && !kb.Asleep;
                 if (manual)
                 {
                     keyboardLevel.Maximum = kb.BacklightLevels - 1;
@@ -3253,7 +3270,7 @@ namespace MXMasterWin
                     keyboardLevelValue.Text = keyboardLevel.Value.ToString();
                 }
 
-                keyboardTopRow.Enabled = kb != null && kb.FnPresent;
+                keyboardTopRow.Enabled = kb != null && kb.FnPresent && !kb.Asleep;
                 keyboardTopRow.SelectedIndex = kb != null && kb.FnPresent ? (kb.FnMediaFirst ? 0 : 1) : -1;
 
                 int keyboardCount = kb != null && kb.Hosts.Count > 0 ? kb.Hosts.Count : 3;
@@ -4637,6 +4654,7 @@ namespace MXMasterWin
         private void OnHidppReady(int deviceIndex, int featureIndex)
         {
             rawInput.ConfigureHidppDiversion(deviceIndex, featureIndex);
+            if (keyboard != null) keyboard.SetMouseSlot(deviceIndex);
             // The saved speed is written back below, so any queued precision write is out of date.
             int restoreSeq = Interlocked.Increment(ref precisionSeq);
             try
@@ -4866,6 +4884,7 @@ namespace MXMasterWin
             precisionRestorePending = normalDpi > 0;
             int haptic = flowHaptic.Checked && !HapticsPaused ? WaveId(flowHapticWave) : -1;
             int keyboardTarget = keyboardFollow.Checked ? KeyboardChannelFor(host) : -1;
+            if (keyboardTarget < 0) keyboard.CancelPendingSwitch();
             int keyboardFrom = keyboardSnapshot != null ? keyboardSnapshot.CurrentHost : -1;
             if (liveLog.Checked)
                 AddLog(DateTime.Now.ToString("HH:mm:ss.fff") + " Switch host -> " + host + " (" + reason + ")");
@@ -4900,7 +4919,15 @@ namespace MXMasterWin
                     {
                         if (keyboardSent) SetKeyboardSnapshot(null);
                         if (sent && liveLog.Checked && keyboardTarget >= 0 && keyboardTarget != keyboardFrom)
-                            AddLog(DateTime.Now.ToString("HH:mm:ss.fff") + " Keyboard switch host -> " + keyboardTarget + " sent=" + keyboardSent);
+                            AddLog(DateTime.Now.ToString("HH:mm:ss.fff") + " Keyboard switch host -> " + keyboardTarget + " sent=" + keyboardSent +
+                                (keyboard.PendingSwitch ? " (asleep; queued until it answers)" : ""));
+                        // Asleep: check often so the queued switch goes as soon as a key wakes it.
+                        if (keyboard.PendingSwitch)
+                        {
+                            keyboardTimer.Stop();
+                            keyboardTimer.Interval = 1500;
+                            keyboardTimer.Start();
+                        }
                         if (restored && restoreSeq == Thread.VolatileRead(ref precisionSeq))
                             precisionRestorePending = false;
                         if (liveLog.Checked)
@@ -4924,6 +4951,9 @@ namespace MXMasterWin
         // reconnect right after the computer wakes up is left alone.
         private void MouseArrived()
         {
+            // The mouse is back on this computer, so a keyboard switch still waiting for the keyboard to
+            // wake would send it away for nothing.
+            keyboard.CancelPendingSwitch();
             bool first = !readyOnce;
             readyOnce = true;
             int now = Environment.TickCount;
@@ -4948,6 +4978,26 @@ namespace MXMasterWin
         [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int virtualKey);
 
         // The mouse sent something after a pause: it may have just come back from another host.
+        // A short HID++ report from the Bolt receiver (raw input, UI thread): 10 slot 8F … is an error
+        // answer, 10 slot 41 … a device connection notice (bit 6 of byte 4 set = link lost).
+        private void OnBoltShortReport(byte[] bytes)
+        {
+            if (keyboard == null) return;
+            int slot = bytes[1];
+            if (bytes[2] == 0x8F && (bytes[4] & 0x0F) == KeyboardManager.SoftwareIdValue)
+            {
+                keyboard.SlotError(slot);
+                return;
+            }
+            if (bytes[2] != 0x41 || slot == rawInput.MouseSlot || (bytes[4] & 0x40) != 0) return;
+            // Another device came back or woke up: most likely the keyboard.
+            keyboard.DeviceAnnounced(slot);
+            if (liveLog.Checked)
+                AddLog(DateTime.Now.ToString("HH:mm:ss.fff") + " Keyboard Bolt dev=" + slot.ToString("X2") + " connected; reading the keyboard");
+            keyboardSoon.Stop();
+            keyboardSoon.Start();
+        }
+
         private void OnMouseActivity()
         {
             if (hidpp != null) hidpp.Recheck();
@@ -5014,6 +5064,7 @@ namespace MXMasterWin
             batteryTimer.Stop();
             hostCheck.Stop();
             keyboardTimer.Stop();
+            keyboardSoon.Stop();
             keyboardLevelApply.Stop();
             Microsoft.Win32.SystemEvents.PowerModeChanged -= powerHandler;
             Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= displayHandler;
@@ -6341,6 +6392,21 @@ namespace MXMasterWin
             wheelCapability = null;
         }
 
+        // Device type from 0x0005 function 2 (0 keyboard, 3 mouse, 4 trackpad, 5 trackball; Solaar's
+        // list); -1 when the device does not say.
+        private static int DeviceKind(HidTransport candidate, int device)
+        {
+            byte[] root = candidate.Request(device, 0, 0, SoftwareId, new byte[] { 0x00, 0x05, 0 }, 900);
+            if (root == null || root.Length < 5 || root[4] == 0) return -1;
+            byte[] type = candidate.Request(device, root[4], 2, SoftwareId, new byte[0], 900);
+            return type == null || type.Length < 5 ? -1 : type[4];
+        }
+
+        private static bool IsPointingKind(int kind)
+        {
+            return kind == 3 || kind == 4 || kind == 5;
+        }
+
         // Finds the mouse's HID++ channel and applies the requested diversion. Caller holds sync.
         private bool Connect()
         {
@@ -6371,6 +6437,18 @@ namespace MXMasterWin
                         // A sleeping Bolt device can take about one second to wake and answer.
                         new byte[] { (byte)(TargetFeature >> 8), (byte)(TargetFeature & 0xFF), 0 }, 1800);
                     if (root == null || root.Length < 7 || root[4] == 0) continue;
+                    // A keyboard on the same receiver (an MX Mechanical, for one) also has 1B04; skip any
+                    // slot that says it is not a mouse, or the mouse is never found.
+                    if (candidateTransport.IsBolt)
+                    {
+                        int kind = DeviceKind(candidateTransport, candidateDevice);
+                        if (kind >= 0 && !IsPointingKind(kind))
+                        {
+                            Report("BOLT dev=" + candidateDevice.ToString("X2") + " has 1B04 but is not a mouse (type " + kind + "); skipped");
+                            if (lastBoltIndex == candidateDevice) lastBoltIndex = -1;
+                            continue;
+                        }
+                    }
                     transport = candidateTransport;
                     deviceIndex = candidateDevice;
                     if (candidateTransport.IsBolt) lastBoltIndex = candidateDevice;
@@ -6994,6 +7072,15 @@ namespace MXMasterWin
             public byte[] Request(int targetDevice, int targetFeature, int function, byte softwareId,
                 byte[] parameters, int timeoutMilliseconds)
             {
+                return Request(targetDevice, targetFeature, function, softwareId, parameters, timeoutMilliseconds, null);
+            }
+
+            // giveUp is asked every 100 ms while waiting: a Bolt receiver answers a request to an empty or
+            // unreachable slot on its short-report interface, which this handle cannot see, so the caller
+            // learns about it elsewhere (raw input) and stops the wait early.
+            public byte[] Request(int targetDevice, int targetFeature, int function, byte softwareId,
+                byte[] parameters, int timeoutMilliseconds, Func<bool> giveUp)
+            {
                 byte[] packet = new byte[outputLength];
                 packet[0] = 0x11;
                 packet[1] = (byte)targetDevice;
@@ -7002,6 +7089,10 @@ namespace MXMasterWin
                 int parameterCount = Math.Min(parameters.Length, packet.Length - 4);
                 Array.Copy(parameters, 0, packet, 4, parameterCount);
 
+                // This handle is read only while a request waits, so everything the interface sent in
+                // between (other devices on the receiver, Options+ traffic, a late reply to an earlier
+                // request) is still queued. Drop it so an old reply can never be taken for this one.
+                HidD_FlushQueue(handle);
                 stream.Write(packet, 0, packet.Length);
                 stream.Flush();
 
@@ -7009,8 +7100,12 @@ namespace MXMasterWin
                 while (timer.ElapsedMilliseconds < timeoutMilliseconds)
                 {
                     int remaining = Math.Max(1, timeoutMilliseconds - (int)timer.ElapsedMilliseconds);
-                    byte[] response = ReadOne(remaining);
-                    if (response == null) return null;
+                    byte[] response = ReadOne(giveUp == null ? remaining : Math.Min(remaining, 100));
+                    if (response == null)
+                    {
+                        if (giveUp == null || giveUp()) return null;
+                        continue;
+                    }
                     if (response.Length < 4 || response[1] != (byte)targetDevice) continue;
                     if (response[2] == 0xFF && response.Length >= 6 &&
                         response[3] == (byte)targetFeature && response[4] == packet[3])
@@ -7029,14 +7124,15 @@ namespace MXMasterWin
             {
                 byte[] buffer = new byte[inputLength];
                 IAsyncResult pending = stream.BeginRead(buffer, 0, buffer.Length, null, null);
+                int read;
                 if (!pending.AsyncWaitHandle.WaitOne(timeoutMilliseconds))
                 {
                     CancelIoEx(handle, IntPtr.Zero);
-                    try { stream.EndRead(pending); }
-                    catch { }
-                    return null;
+                    // A report that completed just before the cancel is kept instead of lost.
+                    try { read = stream.EndRead(pending); }
+                    catch { read = 0; }
                 }
-                int read = stream.EndRead(pending);
+                else read = stream.EndRead(pending);
                 if (read <= 0) return null;
                 if (read == buffer.Length) return buffer;
                 byte[] exact = new byte[read];
@@ -7084,6 +7180,7 @@ namespace MXMasterWin
         [DllImport("hid.dll")] private static extern void HidD_GetHidGuid(out Guid guid);
         [DllImport("hid.dll", SetLastError = true)] private static extern bool HidD_GetPreparsedData(SafeFileHandle device, out IntPtr data);
         [DllImport("hid.dll", SetLastError = true)] private static extern bool HidD_FreePreparsedData(IntPtr data);
+        [DllImport("hid.dll", SetLastError = true)] private static extern bool HidD_FlushQueue(SafeFileHandle device);
         [DllImport("hid.dll")] private static extern int HidP_GetCaps(IntPtr data, out HIDP_CAPS caps);
         [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr SetupDiGetClassDevs(ref Guid guid, IntPtr enumerator, IntPtr parent, uint flags);
@@ -7119,6 +7216,17 @@ namespace MXMasterWin
         public bool BacklightManual;
         public bool FnPresent;
         public bool FnMediaFirst = true;     // true: the top row sends media keys, hold Fn for F1-F12
+        // The keyboard did not answer this time (asleep, or on another computer); the values above are
+        // the last reading. A keyboard on a Bolt receiver sleeps after a while idle and cannot be reached
+        // until a key is pressed.
+        public bool Asleep;
+
+        public KeyboardSnapshot Copy()
+        {
+            var copy = (KeyboardSnapshot)MemberwiseClone();
+            copy.Hosts = new List<HostEntry>(Hosts);
+            return copy;
+        }
     }
 
     // HID++ 2.0 with a Logitech keyboard (tested on an MX Mechanical Mini), on handles of its own so
@@ -7138,7 +7246,21 @@ namespace MXMasterWin
         private readonly Dictionary<int, int> features = new Dictionary<int, int>();
         private volatile bool disposed;
         private volatile bool connected;
+        private volatile bool asleep;
         private int lastSearch = unchecked(Environment.TickCount - 600000);
+        private KeyboardSnapshot last;          // last good reading of the keyboard in use
+        // A switch asked for while the keyboard was asleep: sent as soon as it answers again, if that
+        // happens before the deadline (pendingHost -1 = none).
+        private volatile int pendingHost = -1;
+        private int pendingUntil;
+        private const int PendingMilliseconds = 60000;
+        private int lastSlot = -1;              // Bolt slot the keyboard was last found on
+        private volatile int hintSlot = -1;     // Bolt slot that just announced a connection
+        private volatile int errorSlot = -1;    // Bolt slot the receiver just reported empty or unreachable
+        private volatile int mouseSlot = -1;    // Bolt slot of the mouse (never the keyboard)
+
+        // The software ID in this manager's requests; the receiver's errors carry it in their low nibble.
+        public const int SoftwareIdValue = SoftwareId;
 
         public KeyboardManager(Action<string> reportAction)
         {
@@ -7147,6 +7269,33 @@ namespace MXMasterWin
 
         // Read without the lock so the UI thread never waits behind a search.
         public bool Connected { get { return connected; } }
+        public bool Asleep { get { return asleep; } }
+        public bool PendingSwitch { get { return pendingHost >= 0 && unchecked(pendingUntil - Environment.TickCount) > 0; } }
+
+        // A device on the Bolt receiver (not the mouse) just connected: a keyboard coming back from
+        // another computer or waking up. The next search asks that slot first.
+        public void DeviceAnnounced(int slot)
+        {
+            if (slot >= 1 && slot <= 6) hintSlot = slot;
+        }
+
+        // The Bolt receiver answered one of this manager's requests to a slot with an error (empty
+        // slot, or a device that is off or out of range): stop waiting for that slot.
+        public void SlotError(int slot)
+        {
+            errorSlot = slot;
+        }
+
+        public void SetMouseSlot(int slot)
+        {
+            mouseSlot = slot >= 1 && slot <= 6 ? slot : -1;
+        }
+
+        public void CancelPendingSwitch()
+        {
+            if (pendingHost >= 0) Report("queued keyboard switch cancelled");
+            pendingHost = -1;
+        }
 
         // Reads the keyboard, looking for one first when none is connected (at most every 8 seconds
         // unless forced). Null when there is no keyboard on this computer.
@@ -7164,7 +7313,33 @@ namespace MXMasterWin
                         if (transport == null) return null;
                     }
                     KeyboardSnapshot snapshot = ReadSnapshot();
-                    if (snapshot == null) Drop("keyboard no longer answers");
+                    if (snapshot == null)
+                    {
+                        // Never read it: treat it as gone. Read before: it is most likely asleep, so keep
+                        // the handle and the last reading and try again later.
+                        if (last == null)
+                        {
+                            Drop("keyboard no longer answers");
+                            return null;
+                        }
+                        if (!asleep) Report("keyboard not answering (asleep or on another computer); keeping the last reading");
+                        asleep = true;
+                        KeyboardSnapshot kept = last.Copy();
+                        kept.Asleep = true;
+                        return kept;
+                    }
+                    if (asleep) Report("keyboard answers again");
+                    asleep = false;
+                    last = snapshot;
+                    int queued = pendingHost;
+                    if (queued >= 0)
+                    {
+                        pendingHost = -1;
+                        if (unchecked(pendingUntil - Environment.TickCount) <= 0)
+                            Report("queued keyboard switch to " + queued + " expired");
+                        else if (queued != snapshot.CurrentHost && SendChangeHost(queued) == 1)
+                            return null;     // it has left this computer
+                    }
                     return snapshot;
                 }
                 catch (Exception ex)
@@ -7184,20 +7359,21 @@ namespace MXMasterWin
                 if (disposed) return false;
                 try
                 {
+                    pendingHost = -1;
                     if (transport == null) Search(false);
                     if (transport == null) return false;
-                    byte[] info = Call(0x1814, 0);
-                    if (info == null)
+                    int result = SendChangeHost(host);
+                    if (result >= 0) return result == 1;
+                    if (asleep || last != null)
                     {
-                        Drop("keyboard no longer answers");
-                        return false;
+                        // Asleep (typical on Bolt): it cannot be reached until a key is pressed, so send
+                        // the switch the moment it answers again.
+                        asleep = true;
+                        pendingHost = host;
+                        pendingUntil = unchecked(Environment.TickCount + PendingMilliseconds);
+                        Report("keyboard not answering; switch to " + host + " queued for " + PendingMilliseconds / 1000 + " s");
                     }
-                    if (host < 0 || host >= info[4] || host == info[5]) return false;
-                    Report("change host " + info[5] + " -> " + host);
-                    try { CallTimed(0x1814, 1, 300, (byte)host); }
-                    catch (Exception ex) { Report("change host: " + ex.Message); }
-                    Drop(null);
-                    return true;
+                    return false;
                 }
                 catch (Exception ex)
                 {
@@ -7205,6 +7381,21 @@ namespace MXMasterWin
                     return false;
                 }
             }
+        }
+
+        // 1 = sent (the keyboard has left), 0 = it answered but is already there or the channel is invalid,
+        // -1 = no answer.
+        private int SendChangeHost(int host)
+        {
+            byte[] info = CallTimed(0x1814, 0, FirstCallTimeout);
+            if (info == null) return -1;
+            if (host < 0 || host >= info[4] || host == info[5]) return 0;
+            Report("change host " + info[5] + " -> " + host);
+            try { CallTimed(0x1814, 1, 300, (byte)host); }
+            catch (Exception ex) { Report("change host: " + ex.Message); }
+            Drop(null);
+            last = null;
+            return 1;
         }
 
         // Backlight: off keeps the current mode; mode 1 automatic, 3 manual; the level is written only
@@ -7264,9 +7455,20 @@ namespace MXMasterWin
             Drop(null);
             CloseTransports();
             transports = HidppDiversionManager.HidTransport.FindKeyboardTransports(verbose ? (Action<string>)Report : delegate { });
+            // Bolt slots: the one that just announced a connection and the one the keyboard was found on
+            // before come first; the mouse's own slot is skipped. Each slot gets the long wait an idle
+            // keyboard needs, cut short when the receiver reports the slot empty or unreachable (seen on
+            // its short-report interface by raw input, passed in through SlotError).
+            int hint = hintSlot;
+            hintSlot = -1;
+            var boltSlots = new List<int>();
+            if (hint >= 1 && hint <= 6) boltSlots.Add(hint);
+            if (lastSlot >= 1 && lastSlot <= 6 && !boltSlots.Contains(lastSlot)) boltSlots.Add(lastSlot);
+            for (int n = 1; n <= 6; n++) if (!boltSlots.Contains(n)) boltSlots.Add(n);
+            boltSlots.Remove(mouseSlot);
             foreach (HidppDiversionManager.HidTransport candidate in transports)
             {
-                int[] slots = candidate.IsBolt ? new[] { 1, 2, 3, 4, 5, 6 } : new[] { 0xFF };
+                int[] slots = candidate.IsBolt ? boltSlots.ToArray() : new[] { 0xFF };
                 foreach (int slot in slots)
                 {
                     transport = candidate;
@@ -7275,7 +7477,15 @@ namespace MXMasterWin
                     byte[] type = null;
                     try
                     {
-                        if (FindFeature(0x0005, 600) >= 0) type = CallTimed(0x0005, 2, 600);
+                        errorSlot = -1;
+                        int probe = slot;
+                        byte[] root = candidate.Request(slot, 0, 0, SoftwareId, new byte[] { 0x00, 0x05, 0 }, FirstCallTimeout,
+                            delegate { return errorSlot == probe; });
+                        if (root != null && root[4] != 0)
+                        {
+                            features[0x0005] = root[4];
+                            type = CallTimed(0x0005, 2, 900);
+                        }
                     }
                     catch { }
                     if (type != null && type[4] == 0 && FindFeature(0x1814, 900) >= 0)
@@ -7285,6 +7495,8 @@ namespace MXMasterWin
                             if (other != candidate) other.Dispose();
                         transports = new List<HidppDiversionManager.HidTransport> { candidate };
                         connected = true;
+                        last = null;
+                        if (candidate.IsBolt) lastSlot = slot;
                         Report("keyboard found on " + candidate.Name + " dev=" + slot.ToString("X2"));
                         return;
                     }
@@ -7303,6 +7515,7 @@ namespace MXMasterWin
             deviceIndex = -1;
             features.Clear();
             connected = false;
+            asleep = false;
         }
 
         private void CloseTransports()
@@ -7315,9 +7528,13 @@ namespace MXMasterWin
             transports = new List<HidppDiversionManager.HidTransport>();
         }
 
+        // An idle keyboard on Bolt answers the first request only after about a second (measured on
+        // the MX Mechanical Mini: 0.9 s timeouts were missed by ~20 ms), so the first call waits longer.
+        private const int FirstCallTimeout = 2500;
+
         private KeyboardSnapshot ReadSnapshot()
         {
-            byte[] info = Call(0x1814, 0);
+            byte[] info = CallTimed(0x1814, 0, FirstCallTimeout);
             if (info == null) return null;
             var s = new KeyboardSnapshot();
             s.Transport = transport.Name;
@@ -7858,6 +8075,7 @@ namespace MXMasterWin
         private volatile int divertedFeatureIndex = -1;
         private readonly Action activity;
         private readonly Action<int, int> mouseMove;
+        private readonly Action<byte[]> boltShortReport;
         private int lastMxInput;
         private bool sawMxInput;
         // A host switch or reconnect always leaves at least this long without any report.
@@ -7867,15 +8085,29 @@ namespace MXMasterWin
         private const uint RIDEV_INPUTSINK = 0x00000100, RIDEV_PAGEONLY = 0x00000020;
 
         public RawInputMonitor(IntPtr handle, Action<string> reportAction, Action<string, int, int, bool> vendorButtonAction,
-            Action activityAction, Action<int, int> mouseMoveAction)
+            Action activityAction, Action<int, int> mouseMoveAction, Action<byte[]> boltShortReportAction)
         {
             AssignHandle(handle);
             report = reportAction;
             vendorButton = vendorButtonAction;
             activity = activityAction;
             mouseMove = mouseMoveAction;
+            boltShortReport = boltShortReportAction;
             Register(handle);
         }
+
+        // The mouse sent something; after a pause that may mean it came back from another host.
+        private void NoteMouseInput()
+        {
+            int now = Environment.TickCount;
+            bool resumed = !sawMxInput || unchecked(now - lastMxInput) >= ActivityGapMilliseconds;
+            sawMxInput = true;
+            lastMxInput = now;
+            if (resumed) activity();
+        }
+
+        // Bolt slot (or 0xFF on Bluetooth) of the mouse whose buttons are diverted; -1 before that.
+        public int MouseSlot { get { return divertedDeviceIndex; } }
 
         // Time since the mouse last sent anything; a large value when it never has.
         public int MillisecondsSinceInput
@@ -7948,15 +8180,11 @@ namespace MXMasterWin
                     names[header.hDevice] = name;
                 }
                 if (!IsMx(name)) return;
-                int now = Environment.TickCount;
-                bool resumed = !sawMxInput || unchecked(now - lastMxInput) >= ActivityGapMilliseconds;
-                sawMxInput = true;
-                lastMxInput = now;
-                if (resumed) activity();
                 string transport = TransportName(name);
                 int offset = Marshal.SizeOf(typeof(RAWINPUTHEADER));
                 if (header.dwType == 0)
                 {
+                    NoteMouseInput();
                     RAWMOUSE mouse = (RAWMOUSE)Marshal.PtrToStructure(new IntPtr(mem.ToInt64() + offset), typeof(RAWMOUSE));
                     // Movement-only packets are too noisy for button mapping.
                     if (mouse.usButtonFlags != 0)
@@ -7974,6 +8202,17 @@ namespace MXMasterWin
                     byte[] bytes = new byte[total];
                     Marshal.Copy(new IntPtr(hidPtr.ToInt64() + 8), bytes, 0, total);
                     report(transport + " HID size=" + bytesPerReport + " count=" + reportCount + " hex=" + BitConverter.ToString(bytes));
+
+                    // A Bolt receiver also carries the keyboard (and Options+ talking to it). Once the mouse's
+                    // slot is known, only HID++ reports from that slot count as mouse activity; otherwise
+                    // typing or a keyboard read made the mouse check run against a sleeping mouse.
+                    int mouseSlot = divertedDeviceIndex;
+                    bool hidpp = bytes.Length >= 3 && (bytes[0] == 0x10 || bytes[0] == 0x11);
+                    if (transport != "BOLT" || mouseSlot <= 0 || (hidpp && bytes[1] == mouseSlot))
+                        NoteMouseInput();
+                    // Short HID++ reports from the receiver (connection notices, errors) go to the keyboard side.
+                    if (transport == "BOLT" && hidpp && bytes[0] == 0x10 && bytes.Length >= 7 && boltShortReport != null)
+                        boltShortReport(bytes);
 
                     // Captured MX Master 4 HID++ diverted-button notification:
                     // 11 [FF for BLE / 01-06 for Bolt] 0D 20
