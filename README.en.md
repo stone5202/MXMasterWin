@@ -12,7 +12,7 @@ MX Master Win is a portable Windows utility for the Logitech MX Master 4. It is 
 
 It is the Windows edition of the same product as [MX Master Mac](https://github.com/stone5202/MXMasterMac) for macOS, with the same features and the same way of setting them up. Run one edition on each computer and MX Flow takes the mouse back and forth between Windows and Mac.
 
-> Current version: 2.3.1 · Interface languages: Traditional Chinese, English (follows the system by default)
+> Current version: 2.4 · Interface languages: Traditional Chinese, English (follows the system by default)
 >
 > Up to 1.1 the app was called MX Master Portable. Put the new `MXMasterWin.exe` in the same folder and it picks up the old settings file on first run.
 
@@ -62,6 +62,14 @@ See the [changelog](CHANGELOG.en.md) or [GitHub Releases](https://github.com/sto
   Keyboard
 </p>
 
+<p align="center">
+  <img src="docs/screenshots/receiver.en.png" width="80%" alt="Receiver page: pair a new device with a Logi Bolt receiver and the paired devices">
+</p>
+
+<p align="center">
+  Receiver
+</p>
+
 ## Download and use
 
 1. Download `MXMasterWin.exe` from [Releases](https://github.com/stone5202/MXMasterWin/releases/latest).
@@ -81,8 +89,10 @@ The EXE is not code-signed, so Windows SmartScreen may warn on first launch. On 
 - **Haptics**: set the mouse's haptic strength and four haptic moments separately: ring slices, gesture recognized, before switching computers and mode changes. Each can be switched on or off, given one of six waveforms and tried.
 - **Precision mode**: hold the chosen button to drop the pointer to a slower DPI (400 by default) for detailed work such as photo editing or alignment; release to go back. It can also be toggled from the ring or a gesture. When precision mode or the wheel mode changes, the new state shows briefly at the bottom of the screen.
 - **Battery**: shows the level, whether it is charging and the connection. When the level drops to the threshold (15% by default) while not charging, one tray notification appears, and haptics can pause automatically to save power.
-- **Keyboard** (2.3 and later): for a Logitech keyboard connected over Bluetooth or sharing the Logi Bolt receiver with the mouse, shows connection, battery and firmware, and sets the backlight (automatic, manual brightness or off) and whether the top row sends media keys or F1–F12. When the mouse moves to another computer (MX Flow, Switch to channel or the Switch button), the keyboard can move to the matching channel with it, and each channel's pairing can be changed. With a keyboard connected, the bottom-left corner shows both batteries.
-- **Device settings**: shows battery level and firmware version; adjusts pointer speed (DPI), SmartShift, scroll direction (Standard / Natural) and haptic feedback strength. Values you apply are saved and re-applied at start-up and whenever the mouse reconnects.
+- **Keyboard** (2.3 and later): for a Logitech keyboard connected over Bluetooth or sharing the Logi Bolt receiver with the mouse, shows connection, battery and firmware, and sets the backlight (automatic, manual brightness or off) and whether the top row sends media keys or F1–F12. When the mouse moves to another computer (MX Flow, Switch to channel or the Switch button), the keyboard can move to the matching channel with it, and each channel's pairing can be changed. With a keyboard connected, the bottom-left corner shows both batteries. From 2.4 it can also disable keys (Caps Lock, for one), set the OS layout of the current channel, and set backlight delays for hands away, hands near and external power.
+- **Receiver** (2.4 and later): pair a new mouse or keyboard with a Logi Bolt receiver (passkey typed on the keyboard or clicked on the mouse), list paired devices and unpair them, without installing Logi Bolt or Logi Options+.
+- **Channel names** (2.4 and later): when the current channel of the mouse or keyboard stores a different name from this computer (a channel paired through Logi Bolt is stored as "Logitech Bolt receiver", for one), this computer's name is written, so MX Flow and the keyboard-follows matching are more accurate.
+- **Device settings**: shows battery level and firmware version; adjusts pointer speed (DPI), SmartShift, scroll direction (Standard / Natural) and haptic feedback strength, plus ratchet torque, thumb-wheel inversion and high-resolution scrolling when the device supports them (2.4 and later). Values you apply are saved and re-applied at start-up and whenever the mouse reconnects.
 - **Recovers after a connection change**: when the mouse goes to another computer and comes back, or moves between Bluetooth and Logi Bolt, the special buttons are enabled again automatically.
 - **Connections**: Bluetooth LE and the Logi Bolt receiver.
 - **Also**: every setting is saved automatically, only one instance runs, mapping can be paused from the tray, it can start when you sign in to Windows, and the interface switches between Chinese and English.
@@ -94,6 +104,7 @@ The EXE is not code-signed, so Windows SmartScreen may warn on first launch. On 
 - .NET Framework 4.x (included with Windows; nothing to install)
 - Logitech MX Master 4 (Bluetooth LE or Logi Bolt)
 - For the keyboard features (optional): a Logitech keyboard with HID++ 2.0
+- For the Receiver page (optional): a Logi Bolt receiver (Unifying and Lightspeed are not supported)
 
 ## Known limitations
 
@@ -112,7 +123,9 @@ The EXE is not code-signed, so Windows SmartScreen may warn on first launch. On 
 - Special buttons (gesture button `0x00C3`, Actions Ring button `0x01A0`): temporary diversion is set through Windows' built-in HID interface with HID++ 2.0 feature `0x1B04`, and button notifications arrive through Raw Input. Diversion is released when the app is paused or exits.
 - Device settings: HID++ features `0x1004` (battery), `0x0003` (firmware), `0x2201` (DPI), `0x2111` (SmartShift), `0x2121` (scroll direction) and `0x19B0` (haptic strength and waveform playback). Every write is read back to confirm it. Precision mode writes a lower DPI temporarily; the normal speed is written back on release, pause, exit, or before the mouse moves to another computer.
 - MX Flow: Raw Input supplies this mouse's own movement, which is used to tell whether the pointer is held against the outer edge of the outermost monitor and still being pushed outward. HID++ feature `0x1814` (change host) sends the switch and `0x1815` reads the host name stored on each channel.
-- Keyboard: also through Windows' built-in HID interface, with HID++ features `0x1982` (backlight), `0x40A3` (top row), and `0x1814` / `0x1815` (change host and host names). When the keyboard follows the mouse, it is asked to switch only after the mouse switch has gone out.
+- Keyboard: also through Windows' built-in HID interface, with HID++ features `0x1982` (backlight and delays), `0x40A3` (top row), `0x4521` (disable keys), `0x4531` (OS layout), and `0x1814` / `0x1815` (change host, read and write host names). When the keyboard follows the mouse, it is asked to switch only after the mouse switch has gone out.
+- Ratchet torque, thumb-wheel inversion and high-resolution scrolling: HID++ features `0x2111`, `0x2150` and `0x2121`; only the matching field or bit is changed.
+- Receiver: the Logi Bolt receiver's own HID++ interface is opened directly; pairing, listing and unpairing use HID++ 1.0 registers and receiver notifications. The engineering log never writes pairing passkeys, device addresses or serial numbers.
 - Reconnect detection: when the mouse sends input again after a pause, the diversion state is read back and re-applied if it is gone; when the current connection stops answering, the app looks for the mouse on the other connections (Bluetooth / Bolt).
 
 HID++ feature numbers and packet layouts follow the public implementations in the open-source projects [Solaar](https://github.com/pwr-Solaar/Solaar) and [logiops](https://github.com/PixlOne/logiops).
