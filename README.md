@@ -12,7 +12,7 @@ MX Master Win 是給 Logitech MX Master 4 用的免安裝 Windows 小工具：�
 
 它和 macOS 版 [MX Master Mac](https://github.com/stone5202/MXMasterMac) 是同一個產品的兩個版本，功能與設定方式一致；兩台電腦各裝一個版本，就能用 MX Flow 在 Windows 與 Mac 之間來回切換。
 
-> 目前版本：2.4 · 介面語言：繁體中文、English（預設跟隨系統）
+> 目前版本：2.5 · 介面語言：繁體中文、English（預設跟隨系統）
 >
 > 1.1 以前的名稱是 MX Master Portable。把新的 `MXMasterWin.exe` 放在原本的資料夾，第一次執行時會自動沿用舊的設定檔。
 
@@ -70,6 +70,14 @@ MX Master Win 是給 Logitech MX Master 4 用的免安裝 Windows 小工具：�
   接收器
 </p>
 
+<p align="center">
+  <img src="docs/screenshots/others.zh-TW.png" width="80%" alt="其他裝置頁：G502 的電量、DPI、回報率、設定檔、燈光與按鍵對應">
+</p>
+
+<p align="center">
+  其他裝置
+</p>
+
 ## 下載與使用
 
 1. 到 [Releases](https://github.com/stone5202/MXMasterWin/releases/latest) 下載 `MXMasterWin.exe`。
@@ -91,6 +99,7 @@ EXE 沒有數位簽章，第一次執行時 Windows SmartScreen 可能會顯示�
 - **電池**：顯示電量、是否充電與連線方式。電量降到門檻（預設 15%）且沒有充電時，從系統匣跳出一次通知，並可自動暫停震動以省電。
 - **鍵盤**（2.3 起）：Logitech 鍵盤以藍牙直連或與滑鼠共用 Logi Bolt 接收器時，顯示連線、電量與韌體，設定背光（自動／手動亮度／關閉）與最上排按鍵預設（媒體鍵或 F1–F12）。滑鼠切到另一台電腦時（MX Flow、「切換到頻道」或「切換過去」），鍵盤可以一起切到對應的頻道，每個頻道的對應可自訂。連著鍵盤時，左下角同時顯示滑鼠與鍵盤的電量。2.4 起還可以停用按鍵（例如 Caps Lock）、設定目前頻道的作業系統配置，以及背光在手離開、手靠近與接上電源時的延遲時間。
 - **接收器**（2.4 起）：在 Logi Bolt 接收器上配對新的滑鼠或鍵盤（鍵盤輸入數字、滑鼠按左右鍵驗證）、列出已配對的裝置並解除配對，不必另外安裝 Logi Bolt 或 Logi Options+。
+- **其他裝置**（2.5 起）：列出 Lightspeed、Unifying 與 Nano 接收器上的羅技裝置，顯示連線、電量與韌體，多台時用分頁切換，左下角也會顯示電量。G502 LIGHTSPEED 可切換 DPI 段與設定檔，修改 DPI、回報率、燈光與按鍵（存在滑鼠裡，寫入前先備份、可還原）；設成「交給 App」的按鍵（例如 G6、G9）可執行 App 動作、快捷鍵、啟動程式、手勢或圓環。
 - **頻道名稱**（2.4 起）：滑鼠或鍵盤目前頻道記錄的名稱和這台電腦不同時（例如經 Logi Bolt 配對的頻道記成「Logitech Bolt receiver」），會寫入這台電腦的名稱，讓 MX Flow 與鍵盤一起切換的自動對應更準確。
 - **裝置設定**：顯示電量與韌體版本；調整指標速度（DPI）、SmartShift、捲動方向（標準／自然）與觸覺回饋強度；裝置支援時還有段落力道、拇指滾輪方向反轉與主滾輪高解析度（2.4 起）。套用過的數值會保存，啟動時與滑鼠重新連線後自動再套用。
 - **切換連線後自動恢復**：滑鼠切到別台電腦再切回來，或在 Bluetooth 與 Logi Bolt 之間切換，專用按鍵會自動重新啟用。
@@ -104,7 +113,8 @@ EXE 沒有數位簽章，第一次執行時 Windows SmartScreen 可能會顯示�
 - .NET Framework 4.x（Windows 內建，不需另外安裝）
 - Logitech MX Master 4（Bluetooth LE 或 Logi Bolt）
 - 鍵盤功能（選用）：支援 HID++ 2.0 的 Logitech 鍵盤
-- 接收器頁（選用）：Logi Bolt 接收器（不支援 Unifying 與 Lightspeed）
+- 接收器頁（選用）：Logi Bolt 接收器（這一頁的配對不支援 Unifying 與 Lightspeed）
+- 其他裝置頁（選用）：Lightspeed、Unifying 或 Nano 接收器上的羅技裝置
 
 ## 已知限制
 
@@ -115,6 +125,7 @@ EXE 沒有數位簽章，第一次執行時 Windows SmartScreen 可能會顯示�
 - 低階滑鼠攔截無法分辨來源裝置：同時接多隻滑鼠時，標準側鍵與水平滾輪的對應也會套用到其他滑鼠。
 - 與 Logi Options+ 同時執行時，兩者可能互相覆寫按鍵改道與裝置設定，建議擇一使用。
 - 示意圖上的按鍵位置為示意，尚未逐一對照實體校正。
+- 其他裝置頁只在 G502 LIGHTSPEED 與 M331 上實測過。其他型號依公開資料辨識，先不開放修改；它們的示意圖是依官方手冊繪製的簡化圖，按鍵位置沒有對照實物，也還沒對應到按鍵清單。
 - 鍵盤功能只在 MX Mechanical Mini 上開發；以 Logi Bolt 配對的頻道在鍵盤上常記成「Logitech Bolt receiver」，自動對應認不出是哪台電腦時，請在「鍵盤」頁手動指定。
 
 ## 運作方式
@@ -126,14 +137,16 @@ EXE 沒有數位簽章，第一次執行時 Windows SmartScreen 可能會顯示�
 - 鍵盤：同樣透過 Windows 內建 HID 介面，以 HID++ 功能 `0x1982`（背光與延遲）、`0x40A3`（最上排按鍵）、`0x4521`（停用按鍵）、`0x4531`（作業系統配置）、`0x1814`／`0x1815`（切換頻道、主機名稱讀寫）讀寫；鍵盤一起切換是在滑鼠確定送出切換後，才請鍵盤換頻道。
 - 段落力道、拇指滾輪反轉、主滾輪高解析度：HID++ 功能 `0x2111`、`0x2150`、`0x2121`，只改對應的欄位或位元，其餘保留。
 - 接收器：直接開啟 Logi Bolt 接收器的 HID++ 介面，以 HID++ 1.0 暫存器與接收器通知進行配對、讀取與解除配對；工程記錄不寫出配對驗證碼、裝置位址與序號。
+- 其他裝置：直接開啟接收器的 HID++ 介面，讀取電量、DPI 與內建設定檔（`0x8100`）；寫入設定檔前先備份，寫入後驗證。G502「交給 App」的按鍵以 `0x8110` 接收，不切換滑鼠模式，也不改按鍵對應。
 - 重新連線偵測：滑鼠停頓後再有輸入時回讀改道狀態，不符就重新套用；原本的連線沒有回應時，改到其他連線（Bluetooth／Bolt）上找滑鼠。
 
-HID++ 的功能編號與封包格式參考了開源專案 [Solaar](https://github.com/pwr-Solaar/Solaar) 與 [logiops](https://github.com/PixlOne/logiops) 的公開實作。
+HID++ 的功能編號與封包格式參考了開源專案 [Solaar](https://github.com/pwr-Solaar/Solaar) 與 [logiops](https://github.com/PixlOne/logiops) 的公開實作；`0x8110` 參考 [hidpp](https://github.com/cvuchener/hidpp)。裝置型號資料來自 [libratbag](https://github.com/libratbag/libratbag)（MIT），授權見 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ## 隱私
 
 - 程式不會建立任何網路連線，也不包含分析、廣告或追蹤元件。MX Flow 只是請滑鼠換頻道，兩台電腦之間不會互相連線。
 - 設定儲存在 EXE 旁邊的 `mxmaster-win.ini`（1.1 以前的 `mxmaster-portable.ini` 會在第一次執行時自動改名沿用）。
+- 修改其他裝置的內建設定檔前，會把原內容備份到 EXE 旁邊的 `profile-backups` 資料夾。
 - 只有在工程模式開啟記錄時，才會把滑鼠事件寫入 EXE 旁邊的 `mxmaster-events.log`；記錄內容是按鍵與 HID 封包，不含鍵盤輸入。
 - 不安裝驅動、服務或排程工作，也不修改登錄檔。預設不會開機自動啟動；只有你在「進階」頁打開「登入 Windows 時自動啟動」時，才會在你的「啟動」資料夾放一個捷徑，關閉時移除。
 
@@ -157,10 +170,14 @@ src/
 ├── app.ico           # EXE 與視窗圖示
 └── app.png           # 介面內的 logo
 tools/
-└── make-icon.ps1     # 產生 app.ico／app.png
+├── make-icon.ps1     # 產生 app.ico／app.png
+└── device-diagrams/  # 產生各系列裝置示意圖
+assets/
+└── device-diagrams/  # 內嵌到 EXE 的裝置示意圖與型號對應
 docs/
 └── screenshots/      # README 用的畫面截圖
 build.ps1             # 建置腳本
+THIRD_PARTY_NOTICES.md
 ```
 
 ## 參與開發

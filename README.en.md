@@ -12,7 +12,7 @@ MX Master Win is a portable Windows utility for the Logitech MX Master 4. It is 
 
 It is the Windows edition of the same product as [MX Master Mac](https://github.com/stone5202/MXMasterMac) for macOS, with the same features and the same way of setting them up. Run one edition on each computer and MX Flow takes the mouse back and forth between Windows and Mac.
 
-> Current version: 2.4 · Interface languages: Traditional Chinese, English (follows the system by default)
+> Current version: 2.5 · Interface languages: Traditional Chinese, English (follows the system by default)
 >
 > Up to 1.1 the app was called MX Master Portable. Put the new `MXMasterWin.exe` in the same folder and it picks up the old settings file on first run.
 
@@ -70,6 +70,14 @@ See the [changelog](CHANGELOG.en.md) or [GitHub Releases](https://github.com/sto
   Receiver
 </p>
 
+<p align="center">
+  <img src="docs/screenshots/others.en.png" width="80%" alt="Other Devices page: G502 battery, DPI, report rate, profile, lighting and button mapping">
+</p>
+
+<p align="center">
+  Other Devices
+</p>
+
 ## Download and use
 
 1. Download `MXMasterWin.exe` from [Releases](https://github.com/stone5202/MXMasterWin/releases/latest).
@@ -91,6 +99,7 @@ The EXE is not code-signed, so Windows SmartScreen may warn on first launch. On 
 - **Battery**: shows the level, whether it is charging and the connection. When the level drops to the threshold (15% by default) while not charging, one tray notification appears, and haptics can pause automatically to save power.
 - **Keyboard** (2.3 and later): for a Logitech keyboard connected over Bluetooth or sharing the Logi Bolt receiver with the mouse, shows connection, battery and firmware, and sets the backlight (automatic, manual brightness or off) and whether the top row sends media keys or F1–F12. When the mouse moves to another computer (MX Flow, Switch to channel or the Switch button), the keyboard can move to the matching channel with it, and each channel's pairing can be changed. With a keyboard connected, the bottom-left corner shows both batteries. From 2.4 it can also disable keys (Caps Lock, for one), set the OS layout of the current channel, and set backlight delays for hands away, hands near and external power.
 - **Receiver** (2.4 and later): pair a new mouse or keyboard with a Logi Bolt receiver (passkey typed on the keyboard or clicked on the mouse), list paired devices and unpair them, without installing Logi Bolt or Logi Options+.
+- **Other Devices** (2.5 and later): lists Logitech devices on Lightspeed, Unifying and Nano receivers with connection, battery and firmware, with tabs for several devices and a battery row in the bottom-left corner. On the G502 LIGHTSPEED you can switch DPI levels and profiles and edit DPI, report rate, lighting and buttons (stored in the mouse, backed up first, restorable). Buttons handed to the app (G6 and G9, for example) can run app actions, shortcuts, programs, gestures or the ring.
 - **Channel names** (2.4 and later): when the current channel of the mouse or keyboard stores a different name from this computer (a channel paired through Logi Bolt is stored as "Logitech Bolt receiver", for one), this computer's name is written, so MX Flow and the keyboard-follows matching are more accurate.
 - **Device settings**: shows battery level and firmware version; adjusts pointer speed (DPI), SmartShift, scroll direction (Standard / Natural) and haptic feedback strength, plus ratchet torque, thumb-wheel inversion and high-resolution scrolling when the device supports them (2.4 and later). Values you apply are saved and re-applied at start-up and whenever the mouse reconnects.
 - **Recovers after a connection change**: when the mouse goes to another computer and comes back, or moves between Bluetooth and Logi Bolt, the special buttons are enabled again automatically.
@@ -104,7 +113,8 @@ The EXE is not code-signed, so Windows SmartScreen may warn on first launch. On 
 - .NET Framework 4.x (included with Windows; nothing to install)
 - Logitech MX Master 4 (Bluetooth LE or Logi Bolt)
 - For the keyboard features (optional): a Logitech keyboard with HID++ 2.0
-- For the Receiver page (optional): a Logi Bolt receiver (Unifying and Lightspeed are not supported)
+- For the Receiver page (optional): a Logi Bolt receiver (pairing on this page does not support Unifying or Lightspeed)
+- For the Other Devices page (optional): a Logitech device on a Lightspeed, Unifying or Nano receiver
 
 ## Known limitations
 
@@ -115,6 +125,7 @@ The EXE is not code-signed, so Windows SmartScreen may warn on first launch. On 
 - The low-level mouse hook cannot tell devices apart: with several mice connected, side-button and horizontal-scroll mappings apply to all of them.
 - When Logi Options+ runs at the same time, the two can overwrite each other's button diversion and device settings. Use one or the other.
 - Button positions on the diagram are schematic and have not been checked one by one against the hardware.
+- The Other Devices page has been tested only on the G502 LIGHTSPEED and M331. Other models are identified from public data and stay read-only; their drawings are simplified from the official guides, with button positions not checked against the hardware or linked to the button list yet.
 - The keyboard features were developed only on the MX Mechanical Mini. Channels paired through Logi Bolt are often stored on the keyboard as "Logitech Bolt receiver"; when Automatic cannot tell which computer that is, pick the channel by hand on the Keyboard page.
 
 ## How it works
@@ -126,14 +137,16 @@ The EXE is not code-signed, so Windows SmartScreen may warn on first launch. On 
 - Keyboard: also through Windows' built-in HID interface, with HID++ features `0x1982` (backlight and delays), `0x40A3` (top row), `0x4521` (disable keys), `0x4531` (OS layout), and `0x1814` / `0x1815` (change host, read and write host names). When the keyboard follows the mouse, it is asked to switch only after the mouse switch has gone out.
 - Ratchet torque, thumb-wheel inversion and high-resolution scrolling: HID++ features `0x2111`, `0x2150` and `0x2121`; only the matching field or bit is changed.
 - Receiver: the Logi Bolt receiver's own HID++ interface is opened directly; pairing, listing and unpairing use HID++ 1.0 registers and receiver notifications. The engineering log never writes pairing passkeys, device addresses or serial numbers.
+- Other Devices: the receiver's HID++ interface is opened directly to read battery, DPI and onboard profiles (`0x8100`). A profile is backed up before a write and verified after it. G502 buttons handed to the app arrive through `0x8110`, without changing the mouse mode or its button mapping.
 - Reconnect detection: when the mouse sends input again after a pause, the diversion state is read back and re-applied if it is gone; when the current connection stops answering, the app looks for the mouse on the other connections (Bluetooth / Bolt).
 
-HID++ feature numbers and packet layouts follow the public implementations in the open-source projects [Solaar](https://github.com/pwr-Solaar/Solaar) and [logiops](https://github.com/PixlOne/logiops).
+HID++ feature numbers and packet layouts follow the public implementations in the open-source projects [Solaar](https://github.com/pwr-Solaar/Solaar) and [logiops](https://github.com/PixlOne/logiops); `0x8110` follows [hidpp](https://github.com/cvuchener/hidpp). The device model data comes from [libratbag](https://github.com/libratbag/libratbag) (MIT); see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Privacy
 
 - The app makes no network connections and contains no analytics, advertising or tracking. MX Flow only asks the mouse to change channel; the two computers never talk to each other.
 - Settings are stored in `mxmaster-win.ini` next to the EXE (a `mxmaster-portable.ini` from 1.1 or earlier is renamed and reused on first run).
+- Before an onboard profile of another device is changed, its contents are backed up to a `profile-backups` folder next to the EXE.
 - Mouse events are written to `mxmaster-events.log` next to the EXE only while capture is on in engineering mode. The log holds button and HID packets, never keyboard input.
 - No driver, service or scheduled task is installed, and the registry is not modified. The app does not start with Windows by default; only when you turn on "Start when I sign in to Windows" on the Advanced page does it put a shortcut in your Startup folder, and it removes it when you turn the switch off.
 
@@ -157,10 +170,14 @@ src/
 ├── app.ico           # EXE and window icon
 └── app.png           # Logo shown in the interface
 tools/
-└── make-icon.ps1     # Generates app.ico / app.png
+├── make-icon.ps1     # Generates app.ico / app.png
+└── device-diagrams/  # Generates the device drawings
+assets/
+└── device-diagrams/  # Device drawings and model table embedded in the EXE
 docs/
 └── screenshots/      # Screenshots used in the README
 build.ps1             # Build script
+THIRD_PARTY_NOTICES.md
 ```
 
 ## Contributing

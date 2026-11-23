@@ -4,6 +4,15 @@
   <a href="CHANGELOG.md">繁體中文</a> · <strong>English</strong>
 </p>
 
+## 2.5 — 2026-11-23
+
+- New Other Devices page: lists Logitech devices on Lightspeed, Unifying and Nano receivers with their connection, battery and firmware. Several devices get a tab row that scrolls when it runs out of room, and cards recover by themselves after a device is turned off or a receiver is replugged.
+- G502 LIGHTSPEED: switch DPI levels and profiles, and edit the DPI levels, report rate, lighting and buttons. These settings live in the mouse, are backed up before each write and can be restored to how they were before the first change.
+- G502 buttons handed to the app (G6 and G9, for example) can run app actions, shortcuts, programs, four-way gestures or the Actions Ring. The actions are stored in this computer's settings file and the mouse is not changed.
+- Built-in identification for 36 Logitech models and drawings for 25 series. Models other than the G502 show information only until editing has been verified on real hardware.
+- The bottom-left corner gains a row for another device's battery; click it to jump to that device.
+- When the MX Master 4 is on another computer, the status line now says so plainly and the bottom-left corner no longer keeps an old battery reading.
+
 ## 2.4 — 2026-11-14
 
 - New Receiver page (between Keyboard and Advanced): pair a new mouse or keyboard with a Logi Bolt receiver (including the passkey typed on a keyboard or clicked on a mouse), list the paired devices and unpair them, without installing Logi Bolt or Logi Options+.

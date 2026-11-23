@@ -60,7 +60,7 @@ namespace MXMasterWin
             }
         }
 
-        internal const string Version = "2.4";
+        internal const string Version = "2.5";
 
         // Set before closing the main window to start the app again (used after a language change).
         internal static bool RestartRequested;
@@ -189,7 +189,11 @@ namespace MXMasterWin
         HostChannel2,
         HostChannel3,
         CustomShortcut,
-        LaunchProgram
+        LaunchProgram,
+        // Only offered for buttons on another mouse (G502).
+        AppGesture,
+        AppRing,
+        AppMouseFunction
     }
 
     // An action plus its optional argument (shortcut text or program command line).
@@ -385,6 +389,34 @@ namespace MXMasterWin
             };
         }
 
+        // Actions for a button on another mouse (G502). Actions that drive the MX Master itself are left out.
+        public static List<ActionChoice> ForOtherDevice()
+        {
+            var list = new List<ActionChoice>
+            {
+                new ActionChoice(MappedAction.PassThrough, Lang.T("不做任何事", "Do nothing")),
+                new ActionChoice(MappedAction.AppGesture, Lang.T("四向手勢（按住）", "4-way gesture (hold)")),
+                new ActionChoice(MappedAction.AppRing, Lang.T("叫出圓環", "Open Actions Ring"))
+            };
+            foreach (ActionChoice choice in CreateChoices())
+            {
+                switch (choice.Action)
+                {
+                    case MappedAction.PassThrough:
+                    case MappedAction.PrecisionHold:
+                    case MappedAction.PrecisionToggle:
+                    case MappedAction.WheelModeToggle:
+                    case MappedAction.HostChannel1:
+                    case MappedAction.HostChannel2:
+                    case MappedAction.HostChannel3:
+                        continue;
+                }
+                list.Add(choice);
+            }
+            list.Add(new ActionChoice(MappedAction.AppMouseFunction, Lang.T("改用滑鼠內建功能…", "Use a mouse function…")));
+            return list;
+        }
+
         // Compact wording for the Actions Ring, where each slice only fits a few characters.
         public static string ShortLabel(MappedAction action)
         {
@@ -435,6 +467,7 @@ namespace MXMasterWin
         private string program = "";
         private int committedIndex;
         private readonly int spacing;
+        private bool shown = true;
 
         // Raised only for changes made by the user, not when Binding is assigned from code.
         public event Action Changed;
@@ -474,6 +507,32 @@ namespace MXMasterWin
             Combo.SizeChanged += delegate { Edit.Height = Combo.Height; };
             Combo.HandleCreated += delegate { Edit.Height = Combo.Height; };
             parent.Controls.Add(Edit);
+            UpdateEditState();
+        }
+
+        // Replaces the standard action list.
+        public void UseChoices(IEnumerable<ActionChoice> choices)
+        {
+            Combo.Items.Clear();
+            foreach (ActionChoice choice in choices) Combo.Items.Add(choice);
+            Combo.SelectedIndex = 0;
+            committedIndex = 0;
+            UpdateEditState();
+        }
+
+        public void SetShown(bool value)
+        {
+            shown = value;
+            Combo.Visible = value;
+            UpdateEditState();
+        }
+
+        // Moves the picker so it fills this row.
+        public void Place(Rectangle row)
+        {
+            int left = row.Right - Edit.Width;
+            if (Combo.Left != row.X || Combo.Top != row.Y) Combo.Location = row.Location;
+            if (Edit.Left != left || Edit.Top != row.Y) Edit.Location = new Point(left, row.Y);
             UpdateEditState();
         }
 
@@ -576,7 +635,7 @@ namespace MXMasterWin
             MappedAction action = SelectedAction;
             // Edit.Visible reads false while the form is still hidden, so keep the decision in a local.
             bool editable = action == MappedAction.CustomShortcut || action == MappedAction.LaunchProgram;
-            Edit.Visible = editable;
+            Edit.Visible = editable && shown;
             // The drop-down takes the whole row unless the edit button needs its share.
             Combo.Width = editable ? Edit.Left - Combo.Left - spacing : Edit.Right - Combo.Left;
         }
@@ -1928,6 +1987,11 @@ namespace MXMasterWin
         public int KeyboardPercent = -1;
         public bool KeyboardCharging;
         public string KeyboardText = "";
+        // One more row for a device on a Lightspeed receiver (G502) while it is connected.
+        public int OtherPercent = -1;
+        public bool OtherCharging;
+        public string OtherName = "";
+        public event Action OtherRowClicked;
 
         public BatteryChip()
         {
@@ -1935,7 +1999,28 @@ namespace MXMasterWin
                 ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
         }
 
-        public bool TwoRows { get { return KeyboardPercent >= 0; } }
+        public int RowCount { get { return 1 + (KeyboardPercent >= 0 ? 1 : 0) + (OtherPercent >= 0 ? 1 : 0); } }
+
+        private bool OnOtherRow(Point point)
+        {
+            int rows = RowCount;
+            if (OtherPercent < 0 || rows < 2) return false;
+            float rowHeight = (Height - 4F * scale) / rows;
+            return point.Y >= 2F * scale + rowHeight * (rows - 1);
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            Cursor = OnOtherRow(e.Location) ? Cursors.Hand : Cursors.Default;
+            base.OnMouseMove(e);
+        }
+
+        protected override void OnMouseClick(MouseEventArgs e)
+        {
+            Action handler = OtherRowClicked;
+            if (e.Button == MouseButtons.Left && handler != null && OnOtherRow(e.Location)) handler();
+            base.OnMouseClick(e);
+        }
 
         protected override void OnPaint(PaintEventArgs e)
         {
@@ -1951,14 +2036,26 @@ namespace MXMasterWin
                 g.DrawPath(border, path);
             }
 
-            if (!TwoRows)
+            int rows = RowCount;
+            if (rows == 1)
             {
                 DrawRow(g, Height / 2F, null, Connected, BatteryPercent, Charging, ConnectionText);
                 return;
             }
-            // Mouse on top, keyboard below, each marked with its Segoe MDL2 glyph (Mouse, KeyboardClassic).
-            DrawRow(g, Height * 0.29F, "\uE962", Connected, BatteryPercent, Charging, ConnectionText);
-            DrawRow(g, Height * 0.71F, "\uE765", true, KeyboardPercent, KeyboardCharging, KeyboardText);
+            // Mouse first, then keyboard and G502, each marked with its Segoe MDL2 glyph (Mouse, KeyboardClassic, Game).
+            float rowHeight = (Height - 4F * scale) / rows;
+            float middle = 2F * scale + rowHeight / 2F;
+            DrawRow(g, middle, "\uE962", Connected, BatteryPercent, Charging, ConnectionText);
+            if (KeyboardPercent >= 0)
+            {
+                middle += rowHeight;
+                DrawRow(g, middle, "\uE765", true, KeyboardPercent, KeyboardCharging, KeyboardText);
+            }
+            if (OtherPercent >= 0)
+            {
+                middle += rowHeight;
+                DrawRow(g, middle, "\uE7FC", true, OtherPercent, OtherCharging, OtherName);
+            }
         }
 
         private void DrawRow(Graphics g, float middle, string glyph, bool connected, int percentValue, bool charging, string connection)
@@ -2169,6 +2266,18 @@ namespace MXMasterWin
         // Keyboard page: a Logitech keyboard's status, backlight and top row, and following the mouse.
         private readonly KeyboardManager keyboard;
         private readonly BoltReceiver bolt;
+        private OtherDevicesManager others;
+        private OtherDevicesPage othersPage;
+        private int demoOthers;
+        private bool mouseAway;
+        // Actions for buttons on another mouse, "<wpid>.<button slot>" -> action. Kept in the INI, not in the mouse.
+        private readonly Dictionary<string, ActionBinding> otherBindings = new Dictionary<string, ActionBinding>(StringComparer.OrdinalIgnoreCase);
+        private List<OtherDeviceSnapshot> otherSnapshots = new List<OtherDeviceSnapshot>();
+        private string otherHeldKey = "";
+        private string chipOtherId;
+        private volatile bool otherGestureHeld;
+        private readonly System.Windows.Forms.Timer othersClock = new System.Windows.Forms.Timer();
+        private readonly string othersBackupFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "profile-backups");
         private BoltReceiverSnapshot receiverSnapshot = new BoltReceiverSnapshot();
         private int demoReceiver;
         private readonly Label receiverTitle = new Label();
@@ -2342,7 +2451,9 @@ namespace MXMasterWin
             };
             powerHandler = delegate(object sender, Microsoft.Win32.PowerModeChangedEventArgs e)
             {
-                if (e.Mode == Microsoft.Win32.PowerModes.Resume) lastResume = Environment.TickCount;
+                if (e.Mode != Microsoft.Win32.PowerModes.Resume) return;
+                lastResume = Environment.TickCount;
+                if (others != null) others.Refresh();
             };
             displayHandler = delegate
             {
@@ -2364,8 +2475,12 @@ namespace MXMasterWin
             bolt = new BoltReceiver(OnBoltReport);
             bolt.Changed += OnBoltChanged;
             foreach (string argument in Environment.GetCommandLineArgs())
+            {
                 if (argument.StartsWith("--demo-receiver=", StringComparison.OrdinalIgnoreCase))
                     Int32.TryParse(argument.Substring(16), out demoReceiver);
+                if (argument.StartsWith("--demo-others=", StringComparison.OrdinalIgnoreCase))
+                    Int32.TryParse(argument.Substring(14), out demoOthers);
+            }
             MouseHook.MouseEvent += OnMouseEvent;
             MouseHook.Install();
 
@@ -2413,6 +2528,20 @@ namespace MXMasterWin
                 if (argument.Equals("--show", StringComparison.OrdinalIgnoreCase)) show = true;
             allowShow = show;
             hidpp.Start();
+            if (demoOthers != 0)
+            {
+                List<OtherDeviceSnapshot> demoList = DemoOthers(demoOthers);
+                othersPage.ShowDevices(demoList);
+                UpdateOtherChip(demoList);
+            }
+            else
+            {
+                others.Start();
+                UpdateOtherReports();
+            }
+            othersClock.Interval = 30000;
+            othersClock.Tick += delegate { if (pages[8].Visible) othersPage.RefreshTimes(); };
+            othersClock.Start();
             // Looks for the keyboard while none is connected (it may come back with Easy-Switch at any
             // time), and keeps the keyboard page current while it is open.
             keyboardTimer.Interval = 10000;
@@ -2531,6 +2660,7 @@ namespace MXMasterWin
                 chip.Connected = false;
                 chip.ConnectionText = Lang.T("未連線", "Not connected");
                 chip.BatteryPercent = -1;
+                chip.Charging = false;
             }
             else
             {
@@ -2613,10 +2743,16 @@ namespace MXMasterWin
             AddNavigation(Lang.T("電池", "Battery"), "\uE83F", 5);   // Battery10
             AddNavigation(Lang.T("鍵盤", "Keyboard"), "\uE765", 6);   // KeyboardClassic
             AddNavigation(Lang.T("接收器", "Receiver"), "\uE88E", 7);   // USB
-            AddNavigation(Lang.T("進階", "Advanced"), "", 8);
+            AddNavigation(Lang.T("其他裝置", "Other Devices"), "\uE7FC", 8);   // Game
+            AddNavigation(Lang.T("進階", "Advanced"), "", 9);
 
             chip.Location = new Point(S(24), S(566));
             chip.Size = new Size(S(202), S(36));
+            chip.OtherRowClicked += delegate
+            {
+                if (chipOtherId != null) othersPage.SelectDevice(chipOtherId);
+                ShowPage(8);
+            };
             Controls.Add(chip);
 
             // ---- Page 0: button mapping ----
@@ -2868,7 +3004,25 @@ namespace MXMasterWin
             // ---- Page 7: Logi Bolt receiver ----
             BuildReceiverPage(AddPage(Lang.T("接收器", "Receiver")));
 
-            // ---- Page 8: everything else ----
+            // ---- Page 8: devices on a Lightspeed receiver ----
+            others = new OtherDevicesManager(
+                open => HidppDiversionManager.LightspeedPort.OpenNew(open, OnOthersReport),
+                SecondsSinceMouse, PostOthers, othersBackupFolder);
+            others.Log += OnOthersReport;
+            others.Changed += delegate(List<OtherDeviceSnapshot> list)
+            {
+                if (demoOthers != 0) return;
+                otherSnapshots = list;
+                othersPage.ShowDevices(list);
+                UpdateOtherChip(list);
+            };
+            others.ButtonChanged += OnOtherButton;
+            others.ButtonsLost += OnOtherButtonsLost;
+            CardPanel othersCard = AddPage(Lang.T("其他裝置", "Other Devices"));
+            othersPage = new OtherDevicesPage(others, S, HasOriginalProfile, GetOtherBinding, SetOtherBinding) { Bounds = new Rectangle(S(10), S(46), S(746), S(402)) };
+            othersCard.Controls.Add(othersPage);
+
+            // ---- Page 9: everything else ----
             CardPanel advancedPage = AddPage(Lang.T("進階", "Advanced"));
             enableSwitch.Text = Lang.T("啟用按鍵對應", "Enable button mapping");
             enableSwitch.Checked = true;
@@ -2995,9 +3149,9 @@ namespace MXMasterWin
             {
                 Text = text,
                 Glyph = glyph,
-                // Nine pages: a little denser than before (like the macOS sidebar) so the battery chip still fits below.
-                Location = new Point(S(24), S(100) + index * S(46)),
-                Size = new Size(S(202), S(42))
+                // Ten pages: dense enough that the two-row battery chip (from y=530) still fits below.
+                Location = new Point(S(24), S(100) + index * S(42)),
+                Size = new Size(S(202), S(38))
             };
             item.Click += delegate { ShowPage(index); };
             navigation.Add(item);
@@ -3484,6 +3638,92 @@ namespace MXMasterWin
             UpdateReceiverUi();
         }
 
+        private static double SecondsSinceMouse()
+        {
+            int elapsed = unchecked(Environment.TickCount - MouseHook.LastEventTick);
+            return elapsed < 0 ? double.MaxValue : elapsed / 1000.0;
+        }
+
+        private void PostOthers(Action action)
+        {
+            try
+            {
+                if (IsHandleCreated && !IsDisposed) BeginInvoke(action);
+            }
+            catch { }
+        }
+
+        private void OnOthersReport(string text)
+        {
+            PostOthers(delegate
+            {
+                if (liveLog.Checked) AddLog(DateTime.Now.ToString("HH:mm:ss.fff") + " " + text);
+            });
+        }
+
+        private bool HasOriginalProfile(OtherDeviceSnapshot d)
+        {
+            return File.Exists(new OtherProfileBackups(othersBackupFolder).OriginalPath(d.BackupKey, d.ActiveProfile));
+        }
+
+        // --demo-others=N: fake cards for checking the layout (1 connected, 2 needs repair, 3 not responding, 4 two devices,
+        // 5 three models, 6 eight devices).
+        private static List<OtherDeviceSnapshot> DemoOthers(int kind)
+        {
+            byte[] profile = new byte[255];
+            byte[][] buttons =
+            {
+                new byte[] { 0x80, 1, 0, 1 }, new byte[] { 0x80, 1, 0, 2 }, new byte[] { 0x80, 1, 0, 4 }, new byte[] { 0x80, 1, 0, 8 },
+                new byte[] { 0x80, 1, 0, 0x10 }, new byte[] { 0x80, 1, 0, 0x20 }, new byte[] { 0x90, 4, 0, 0 }, new byte[] { 0x90, 3, 0, 0 },
+                new byte[] { 0x80, 1, 0, 0x40 }, new byte[] { 0x90, 2, 0, 0 }, new byte[] { 0x90, 1, 0, 0 }
+            };
+            for (int i = 0; i < buttons.Length; i++) Array.Copy(buttons[i], 0, profile, 0x20 + i * 4, 4);
+            var d = new OtherDeviceSnapshot
+            {
+                Receiver = "C539@DEMO", Slot = 1, Name = "G502 LIGHTSPEED Wireless Gaming Mouse", Kind = 3, Wpid = "407F",
+                BatterySource = OtherBatterySource.Voltage, BatteryPercent = 83, Millivolts = 4016, Firmware = "U11 12.03.B002B",
+                Dpi = 1800, DpiMin = 100, DpiMax = 25600, ReportRateMs = 1, OnboardMode = 1, ProfileCount = 3, ActiveProfile = 1,
+                StageIndex = 2, DefaultStage = 2, ButtonCount = 11, SectorSize = 255, UnitId = "DEMO0001", LastSeen = DateTime.UtcNow
+            };
+            d.Profiles = new List<int> { 1, 2, 3 };
+            d.ProfileSlots = new List<int> { 1, 2, 3 };
+            d.OnboardFormatOK = true;
+            d.DpiStages = new List<int> { 800, 1200, 1800, 3200, 6400 };
+            d.Buttons = OtherDevicesProtocol.ProfileButtons(profile, 11);
+            d.Lights = new List<OtherLightEffect> { OtherLightEffect.Cycle(5000, 100), OtherLightEffect.Fixed(255, 255, 255) };
+            var list = new List<OtherDeviceSnapshot> { d };
+            if (kind == 2) d.RepairSector = 1;
+            if (kind == 3) d.Link = OtherDeviceLink.NoAnswer;
+            if (kind == 4)
+            {
+                OtherDeviceSnapshot second = d.Copy();
+                second.Slot = 2;
+                second.Link = OtherDeviceLink.ReceiverGone;
+                list.Add(second);
+            }
+            if (kind == 5 || kind == 6)
+            {
+                string[,] models =
+                {
+                    { "4087", "G903 LIGHTSPEED Wireless Gaming Mouse" }, { "4074", "G305 LIGHTSPEED Wireless Gaming Mouse" },
+                    { "4093", "PRO X SUPERLIGHT Wireless Gaming Mouse" }, { "4085", "G604 LIGHTSPEED Wireless Gaming Mouse" },
+                    { "4099", "G502 X PLUS LIGHTSPEED Gaming Mouse" }, { "409D", "G705 Wireless Gaming Mouse" }, { "4070", "G703 LIGHTSPEED Wireless Gaming Mouse" }
+                };
+                int count = kind == 5 ? 2 : models.GetLength(0);
+                for (int i = 0; i < count; i++)
+                {
+                    OtherDeviceSnapshot more = d.Copy();
+                    more.Slot = i + 2;
+                    more.Wpid = models[i, 0];
+                    more.Name = models[i, 1];
+                    more.BatteryPercent = 71 - i * 8;
+                    if (i == 1) more.Link = OtherDeviceLink.NoAnswer;
+                    list.Add(more);
+                }
+            }
+            return list;
+        }
+
         private void RefreshReceiver()
         {
             if (demoReceiver != 0) receiverSnapshot = DemoReceiver(demoReceiver);
@@ -3545,7 +3785,7 @@ namespace MXMasterWin
             receiverTitle.Text = s.Multiple ? Lang.T("偵測到多個 Logi Bolt 接收器，請只留一個再操作", "More than one Logi Bolt receiver found; leave only one plugged in")
                 : s.Present ? "Logi Bolt"
                 : Lang.T("沒有偵測到 Logi Bolt 接收器，插上後按「重新讀取」", "No Logi Bolt receiver found; plug it in and click Reload");
-            receiverCount.Text = !s.Present ? Lang.T("只支援 Logi Bolt；Unifying 與 Lightspeed 接收器不支援", "Logi Bolt only; Unifying and Lightspeed receivers are not supported")
+            receiverCount.Text = !s.Present ? Lang.T("這裡的配對只支援 Logi Bolt；其他接收器的裝置請看「其他裝置」頁", "Pairing here is Logi Bolt only; devices on other receivers are on the Other Devices page")
                 : s.Slots.Count == 0 ? Lang.T("這個接收器還沒有配對任何裝置", "No devices are paired with this receiver yet")
                 : Lang.T("已使用 ", "") + s.Slots.Count + Lang.T("／6 個槽位", " of 6 slots in use");
             for (int i = 0; i < 6; i++)
@@ -3732,9 +3972,33 @@ namespace MXMasterWin
             chip.KeyboardPercent = kb != null ? kb.BatteryPercent : -1;
             chip.KeyboardCharging = kb != null && kb.Charging;
             chip.KeyboardText = kb == null ? "" : kb.Transport == "BOLT" ? "Logi Bolt" : "Bluetooth";
-            chip.Bounds = chip.TwoRows
-                ? new Rectangle(S(24), S(530), S(202), S(72))
-                : new Rectangle(S(24), S(566), S(202), S(36));
+            LayoutChip();
+        }
+
+        // Bottom-left chip: a row for the first connected device on a Lightspeed receiver.
+        private void UpdateOtherChip(List<OtherDeviceSnapshot> list)
+        {
+            OtherDeviceSnapshot first = null;
+            int count = 0;
+            foreach (OtherDeviceSnapshot d in list)
+            {
+                if (d.Link != OtherDeviceLink.Online || d.BatteryPercent < 0) continue;
+                if (first == null) first = d;
+                count++;
+            }
+            chipOtherId = first != null ? first.Id : null;
+            chip.OtherPercent = first != null ? first.BatteryPercent : -1;
+            chip.OtherCharging = first != null && first.Charging;
+            chip.OtherName = first == null ? "" : OtherText.ShortName(first) + (count > 1 ? " +" + (count - 1) : "");
+            LayoutChip();
+        }
+
+        // The chip grows upwards into the free space under the navigation.
+        private void LayoutChip()
+        {
+            int rows = chip.RowCount;
+            int height = rows == 1 ? 36 : rows == 2 ? 72 : 82;
+            chip.Bounds = new Rectangle(S(24), S(602 - height), S(202), S(height));
             chip.Invalidate();
         }
 
@@ -4044,6 +4308,7 @@ namespace MXMasterWin
             if (index == 4) RefreshHosts();
             if (index == 6) RefreshKeyboard(true);
             if (index == 7) RefreshReceiver();
+            if (index == 8 && demoOthers == 0) others.Refresh();
             for (int i = 0; i < pages.Count; i++)
             {
                 pages[i].Visible = i == index;
@@ -4744,6 +5009,12 @@ namespace MXMasterWin
                         continue;
                     }
                     string key = parts[0].Trim();
+                    if (key.StartsWith("OtherButton.", StringComparison.OrdinalIgnoreCase))
+                    {
+                        ActionBinding otherBinding = ActionBinding.Parse(parts[1]);
+                        if (otherBinding != null && !otherBinding.IsPassThrough) otherBindings[key.Substring(12)] = otherBinding;
+                        continue;
+                    }
                     if (key.Equals("RingStyle", StringComparison.OrdinalIgnoreCase))
                     {
                         ringStyle.SelectedIndex = parts[1].Trim().Equals("Bubble", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
@@ -4950,6 +5221,8 @@ namespace MXMasterWin
                 for (int i = 0; i < ringBindings.Length; i++)
                     lines.Add("Ring" + i + "=" + ringBindings[i]);
                 lines.AddRange(deviceSettings.ToLines());
+                foreach (KeyValuePair<string, ActionBinding> other in otherBindings)
+                    lines.Add("OtherButton." + other.Key + "=" + other.Value);
                 if (trayHintShown) lines.Add("TrayHintShown=True");
                 File.WriteAllLines(configPath, lines.ToArray(), Encoding.UTF8);
                 status.Text = Lang.T("設定已自動儲存", "Settings saved");
@@ -5009,7 +5282,7 @@ namespace MXMasterWin
                 return true;
             }
 
-            if (gestureMode.Checked && gestureActive && e.Kind == MouseHookKind.Move)
+            if ((gestureMode.Checked || otherGestureHeld) && gestureActive && e.Kind == MouseHookKind.Move)
             {
                 int dx = e.Point.X - gestureStart.X;
                 int dy = e.Point.Y - gestureStart.Y;
@@ -5176,6 +5449,95 @@ namespace MXMasterWin
             }
         }
 
+        private ActionBinding GetOtherBinding(string wpid, int button)
+        {
+            ActionBinding binding;
+            return otherBindings.TryGetValue(wpid + "." + button, out binding) ? binding : ActionBinding.Of(MappedAction.PassThrough);
+        }
+
+        private void SetOtherBinding(string wpid, int button, ActionBinding binding)
+        {
+            string key = wpid + "." + button;
+            if (binding == null || binding.IsPassThrough) otherBindings.Remove(key);
+            else otherBindings[key] = binding;
+            SaveSettings();
+            UpdateOtherReports();
+        }
+
+        // The mouse only sends button reports while a button has an action and mapping is on.
+        private void UpdateOtherReports()
+        {
+            if (demoOthers == 0 && others != null) others.SetButtonReports(MouseHook.Enabled && otherBindings.Count > 0);
+        }
+
+        // Only buttons the mouse's profile hands to the app act here, so nothing fires twice.
+        private bool IsOtherAppKey(string wpid, int button)
+        {
+            foreach (OtherDeviceSnapshot d in otherSnapshots)
+                if (d.Wpid == wpid && d.Link == OtherDeviceLink.Online && button < d.Buttons.Count && d.Buttons[button].AppButton.HasValue)
+                    return true;
+            return false;
+        }
+
+        private void OnOtherButton(string wpid, int button, bool pressed)
+        {
+            if (liveLog.Checked)
+                AddLog(DateTime.Now.ToString("HH:mm:ss.fff") + " Others button " + wpid + "." + button + (pressed ? " Down" : " Up"));
+            if (!MouseHook.Enabled) return;
+            string key = wpid + "." + button;
+            if (!pressed && key == otherHeldKey)
+            {
+                otherHeldKey = "";
+                if (otherGestureHeld)
+                {
+                    otherGestureHeld = false;
+                    if (gestureActive) FinishGesture(ActionBinding.Of(MappedAction.PassThrough));
+                }
+                else if (actionRingActive && !actionRing.ClickMode) FinishActionRing();
+                return;
+            }
+            if (!pressed || !IsOtherAppKey(wpid, button)) return;
+            ActionBinding binding = GetOtherBinding(wpid, button);
+            if (binding.IsPassThrough) return;
+            if (binding.Action == MappedAction.AppGesture)
+            {
+                if (gestureActive || actionRingActive) return;
+                otherHeldKey = key;
+                otherGestureHeld = true;
+                BeginGesture(Cursor.Position);
+                return;
+            }
+            if (binding.Action == MappedAction.AppRing)
+            {
+                if (actionRingActive)
+                {
+                    if (actionRing.ClickMode) CancelActionRing();
+                    return;
+                }
+                if (gestureActive) return;
+                BeginActionRing(Cursor.Position);
+                if (!actionRing.ClickMode) otherHeldKey = key;
+                return;
+            }
+            bool sent = ActionRunner.Run(binding);
+            if (liveLog.Checked)
+                AddLog(DateTime.Now.ToString("HH:mm:ss.fff") + " Mapped Others " + key + " selected=" + binding + " sent=" + sent);
+        }
+
+        // The mouse went away (or mapping was paused) with a button held: cancel instead of running an action.
+        private void OnOtherButtonsLost()
+        {
+            if (otherHeldKey.Length == 0) return;
+            otherHeldKey = "";
+            if (otherGestureHeld)
+            {
+                otherGestureHeld = false;
+                gestureActive = false;
+                overlay.Hide();
+            }
+            else if (actionRingActive && !actionRing.ClickMode) CancelActionRing();
+        }
+
         private void BeginGesture(Point start)
         {
             gestureActive = true;
@@ -5188,6 +5550,12 @@ namespace MXMasterWin
 
         private void FinishGesture(MouseInput fallbackInput)
         {
+            FinishGesture(gestureMoved ? ActionBinding.Of(MappedAction.PassThrough) : GetMapping(fallbackInput));
+        }
+
+        // tap runs when the button is released without a direction.
+        private void FinishGesture(ActionBinding tap)
+        {
             gestureActive = false;
             string direction = gestureDirection;
             overlay.Hide();
@@ -5196,7 +5564,7 @@ namespace MXMasterWin
             else if (direction == "右") selected = gestureBindings[1];
             else if (direction == "上") selected = gestureBindings[0];
             else if (direction == "下") selected = gestureBindings[2];
-            else selected = gestureMoved ? ActionBinding.Of(MappedAction.PassThrough) : GetMapping(fallbackInput);
+            else selected = tap;
 
             bool sent = !selected.IsPassThrough && ActionRunner.Run(selected);
             if (liveLog.Checked)
@@ -5628,7 +5996,19 @@ namespace MXMasterWin
                 AddLog(DateTime.Now.ToString("HH:mm:ss.fff") + " HID++ " + text);
             // Protocol details stay in the engineering log; the main window only shows the outcome.
             if (text.StartsWith(HidppDiversionManager.ReadyMark, StringComparison.Ordinal))
+            {
+                mouseAway = false;
                 SetDeviceStatus(Lang.T("滑鼠已就緒，專用按鍵已啟用", "Mouse ready; special buttons enabled"), true);
+            }
+            else if (text.StartsWith(HidppDiversionManager.AwayMark, StringComparison.Ordinal))
+            {
+                SetDeviceStatus(text.Substring(HidppDiversionManager.AwayMark.Length), false);
+                if (!mouseAway)
+                {
+                    mouseAway = true;
+                    ShowBattery(null);
+                }
+            }
             else if (text.StartsWith(HidppDiversionManager.ProblemMark, StringComparison.Ordinal))
                 SetDeviceStatus(text.Substring(HidppDiversionManager.ProblemMark.Length), false);
         }
@@ -5642,6 +6022,8 @@ namespace MXMasterWin
             deferredPending = false;
             heldInputs.Clear();
             hidpp.SetEnabled(MouseHook.Enabled);
+            OnOtherButtonsLost();
+            UpdateOtherReports();
             UpdateTrayText();
             enableSwitch.Checked = MouseHook.Enabled;
             status.Text = MouseHook.Enabled ? Lang.T("已啟用按鍵對應", "Button mapping enabled") : Lang.T("已暫停：所有按鍵恢復原本功能", "Paused: all buttons behave normally");
@@ -5701,6 +6083,8 @@ namespace MXMasterWin
             hidpp.Dispose();
             keyboard.Dispose();
             bolt.Dispose();
+            othersClock.Stop();
+            others.Dispose();
             rawInput.Dispose();
             MouseHook.Uninstall();
             overlay.Close();
@@ -6770,6 +7154,8 @@ namespace MXMasterWin
         public delegate bool MouseEventHandler(MouseHookEvent e);
         public static event MouseEventHandler MouseEvent;
         public static bool Enabled = true;
+        // Tick of the latest event from any mouse; the other-devices reader waits for the pointer to rest.
+        public static volatile int LastEventTick = Environment.TickCount;
         private static IntPtr hook;
         private static readonly HookProc callback = HookCallback;
         private const int WH_MOUSE_LL = 14;
@@ -6790,6 +7176,7 @@ namespace MXMasterWin
 
         private static IntPtr HookCallback(int code, IntPtr wParam, IntPtr lParam)
         {
+            if (code >= 0) LastEventTick = Environment.TickCount;
             if (code >= 0 && Enabled && MouseEvent != null)
             {
                 MSLLHOOKSTRUCT data = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(MSLLHOOKSTRUCT));
@@ -7029,6 +7416,7 @@ namespace MXMasterWin
         // Prefixes on report text that tell the UI the outcome without parsing translated wording.
         public const string ReadyMark = "[ready] ";
         public const string ProblemMark = "[!] ";
+        public const string AwayMark = "[away] ";
 
         private readonly Action<string> report;
         private readonly Action<int, int> ready;
@@ -7267,10 +7655,12 @@ namespace MXMasterWin
 
             if (transport == null)
             {
-                Report(ProblemMark + (transports.Count == 0
-                    ? Lang.T("找不到可寫入的 Logitech HID++ 長報告介面", "No writable Logitech HID++ long-report interface was found")
-                    : Lang.T("找到 HID++ 長報告介面，但找不到支援 1B04 的 MX Master 4 通道",
-                        "A HID++ interface was found, but no MX Master 4 channel supporting 1B04")));
+                // Protocol detail stays in the engineering log; the main window gets the plain version.
+                Report(transports.Count == 0
+                    ? "no writable Logitech HID++ long-report interface"
+                    : "HID++ interface found, but no MX Master 4 channel with 1B04 answered");
+                Report(AwayMark + Lang.T("MX Master 4 目前沒有連到這台電腦（可能切到別台或在睡眠中）",
+                    "MX Master 4 isn't connected to this computer (it may be on another one or asleep)"));
                 return false;
             }
 
@@ -7805,7 +8195,7 @@ namespace MXMasterWin
                     try { transport.Request(deviceIndex, index, 1, SoftwareId, new byte[] { (byte)host }, 300); }
                     catch (Exception ex) { Report("change host: " + ex.Message); }
                     ResetConnection();
-                    Report(ProblemMark + Lang.T("滑鼠已切到另一台電腦", "The mouse has moved to another computer"));
+                    Report(AwayMark + Lang.T("滑鼠已切到另一台電腦", "The mouse has moved to another computer"));
                     return true;
                 }
                 catch (Exception ex)
@@ -8212,6 +8602,235 @@ namespace MXMasterWin
                             if (!SetupDiGetDeviceInterfaceDetail(infoSet, ref data, detail, required, ref required, IntPtr.Zero)) continue;
                             string path = Marshal.PtrToStringUni(new IntPtr(detail.ToInt64() + 4));
                             if (!String.IsNullOrEmpty(path) && path.ToUpperInvariant().Contains("VID_046D&PID_C548")) paths.Add(path);
+                        }
+                        finally { Marshal.FreeHGlobal(detail); }
+                    }
+                }
+                finally { SetupDiDestroyDeviceInfoList(infoSet); }
+                return paths;
+            }
+        }
+
+        // A Lightspeed receiver's HID++ collections for OtherDevicesManager. Only the vendor collections
+        // (usage page 0xFF00) are opened for reading and writing; the receiver's mouse and keyboard
+        // collections are checked with a handle that has no access rights and closed again.
+        internal sealed class LightspeedPort : IOtherPort
+        {
+            private sealed class Channel
+            {
+                public FileStream Reader, Writer;
+                public int InputLength, OutputLength;
+            }
+
+            // Collections already known not to be HID++, so they are not opened again on every search.
+            private static readonly HashSet<string> notHidpp = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            private Channel shortChannel, longChannel;
+            private volatile bool closed;
+            private int closedRaised;
+
+            public string Key { get; private set; }
+            public event Action<byte[]> Received;
+            public event Action Closed;
+
+            public static List<IOtherPort> OpenNew(ICollection<string> openKeys, Action<string> report)
+            {
+                var found = new Dictionary<string, LightspeedPort>();
+                foreach (string path in ReceiverPaths())
+                {
+                    if (notHidpp.Contains(path)) continue;
+                    SafeFileHandle probe = CreateFile(path, 0, FileShareRead | FileShareWrite, IntPtr.Zero, OpenExisting, FileFlagOverlapped, IntPtr.Zero);
+                    if (probe.IsInvalid)
+                    {
+                        probe.Dispose();
+                        continue;
+                    }
+                    HIDP_CAPS caps;
+                    bool ok = TryGetCaps(probe, out caps);
+                    probe.Dispose();
+                    if (!ok) continue;
+                    bool isLong = caps.OutputReportByteLength >= 20 && caps.InputReportByteLength >= 20;
+                    bool isShort = caps.OutputReportByteLength == 7 && caps.InputReportByteLength == 7;
+                    if (caps.UsagePage != 0xFF00 || (!isLong && !isShort))
+                    {
+                        notHidpp.Add(path);
+                        continue;
+                    }
+                    string key = PortKey(path);
+                    if (key == null || openKeys.Contains(key)) continue;
+                    LightspeedPort port;
+                    if (!found.TryGetValue(key, out port))
+                    {
+                        port = new LightspeedPort { Key = key };
+                        found[key] = port;
+                    }
+                    if (isLong ? port.longChannel != null : port.shortChannel != null) continue;
+                    SafeFileHandle reader = OpenPath(path), writer = OpenPath(path);
+                    if (reader == null || writer == null)
+                    {
+                        if (reader != null) reader.Dispose();
+                        if (writer != null) writer.Dispose();
+                        continue;
+                    }
+                    int size = Math.Max(caps.InputReportByteLength, caps.OutputReportByteLength);
+                    var channel = new Channel
+                    {
+                        InputLength = caps.InputReportByteLength,
+                        OutputLength = caps.OutputReportByteLength,
+                        Reader = new FileStream(reader, FileAccess.ReadWrite, size, true),
+                        Writer = new FileStream(writer, FileAccess.ReadWrite, size, true)
+                    };
+                    if (isLong) port.longChannel = channel; else port.shortChannel = channel;
+                }
+                var result = new List<IOtherPort>();
+                foreach (LightspeedPort port in found.Values)
+                {
+                    if (port.longChannel == null)
+                    {
+                        port.Dispose();
+                        continue;
+                    }
+                    report("Others receiver " + port.Key + " collections: long" + (port.shortChannel != null ? " + short" : " only"));
+                    result.Add(port);
+                }
+                return result;
+            }
+
+            // PID + the instance part shared by the receiver's collections.
+            internal static string PortKey(string path)
+            {
+                string upper = path.ToUpperInvariant();
+                int at = upper.IndexOf("VID_046D&PID_", StringComparison.Ordinal);
+                if (at < 0 || upper.Length < at + 17) return null;
+                string receiver = BoltPort.ReceiverKey(path);
+                int cut = receiver.IndexOf('#');
+                if (cut < 0) return null;
+                return upper.Substring(at + 13, 4) + "@" + receiver.Substring(cut + 1);
+            }
+
+            public void Start()
+            {
+                foreach (Channel channel in new[] { shortChannel, longChannel })
+                {
+                    if (channel == null) continue;
+                    Channel c = channel;
+                    var thread = new Thread(delegate () { ReadLoop(c); }) { IsBackground = true, Name = "MXMasterWin Lightspeed reader" };
+                    thread.Start();
+                }
+            }
+
+            private void ReadLoop(Channel channel)
+            {
+                byte[] buffer = new byte[channel.InputLength];
+                while (!closed)
+                {
+                    int read;
+                    try { read = channel.Reader.Read(buffer, 0, buffer.Length); }
+                    catch { break; }
+                    if (read <= 0) break;
+                    byte[] copy = new byte[read];
+                    Array.Copy(buffer, copy, read);
+                    Action<byte[]> handler = Received;
+                    if (handler != null)
+                    {
+                        try { handler(copy); }
+                        catch { }
+                    }
+                }
+                if (!closed && Interlocked.Exchange(ref closedRaised, 1) == 0)
+                {
+                    Action handler = Closed;
+                    if (handler != null)
+                    {
+                        try { handler(); }
+                        catch { }
+                    }
+                }
+            }
+
+            // A short packet goes to the short collection; without one it is sent as a long report.
+            public bool Write(byte[] packet)
+            {
+                if (closed || packet == null || packet.Length < 4) return false;
+                Channel channel = packet[0] == 0x10 && shortChannel != null ? shortChannel : longChannel;
+                byte[] data = new byte[channel.OutputLength];
+                Array.Copy(packet, data, Math.Min(packet.Length, data.Length));
+                if (channel == longChannel) data[0] = 0x11;
+                try
+                {
+                    channel.Writer.Write(data, 0, data.Length);
+                    channel.Writer.Flush();
+                    return true;
+                }
+                catch { return false; }
+            }
+
+            public void Dispose()
+            {
+                closed = true;
+                foreach (Channel channel in new[] { shortChannel, longChannel })
+                {
+                    if (channel == null) continue;
+                    try { channel.Reader.Dispose(); }
+                    catch { }
+                    try { channel.Writer.Dispose(); }
+                    catch { }
+                }
+            }
+
+            private static bool TryGetCaps(SafeFileHandle file, out HIDP_CAPS caps)
+            {
+                caps = new HIDP_CAPS();
+                IntPtr preparsed;
+                if (!HidD_GetPreparsedData(file, out preparsed)) return false;
+                try { return HidP_GetCaps(preparsed, out caps) == HidpStatusSuccess; }
+                finally { HidD_FreePreparsedData(preparsed); }
+            }
+
+            private static SafeFileHandle OpenPath(string path)
+            {
+                SafeFileHandle file = CreateFile(path, GenericRead | GenericWrite, FileShareRead | FileShareWrite,
+                    IntPtr.Zero, OpenExisting, FileFlagOverlapped, IntPtr.Zero);
+                if (!file.IsInvalid) return file;
+                file.Dispose();
+                return null;
+            }
+
+            private static bool IsLightspeedPath(string path)
+            {
+                string upper = path.ToUpperInvariant();
+                foreach (int pid in OtherDevicesProtocol.LightspeedReceivers)
+                    if (upper.Contains("VID_046D&PID_" + pid.ToString("X4"))) return true;
+                return false;
+            }
+
+            private static List<string> ReceiverPaths()
+            {
+                var paths = new List<string>();
+                Guid hidGuid;
+                HidD_GetHidGuid(out hidGuid);
+                IntPtr infoSet = SetupDiGetClassDevs(ref hidGuid, IntPtr.Zero, IntPtr.Zero, DigcfPresent | DigcfDeviceInterface);
+                if (infoSet == new IntPtr(-1)) return paths;
+                try
+                {
+                    for (uint index = 0; ; index++)
+                    {
+                        SP_DEVICE_INTERFACE_DATA data = new SP_DEVICE_INTERFACE_DATA();
+                        data.cbSize = Marshal.SizeOf(typeof(SP_DEVICE_INTERFACE_DATA));
+                        if (!SetupDiEnumDeviceInterfaces(infoSet, IntPtr.Zero, ref hidGuid, index, ref data))
+                        {
+                            if (Marshal.GetLastWin32Error() == 259) break;
+                            continue;
+                        }
+                        uint required = 0;
+                        SetupDiGetDeviceInterfaceDetail(infoSet, ref data, IntPtr.Zero, 0, ref required, IntPtr.Zero);
+                        if (required == 0) continue;
+                        IntPtr detail = Marshal.AllocHGlobal((int)required);
+                        try
+                        {
+                            Marshal.WriteInt32(detail, IntPtr.Size == 8 ? 8 : 6);
+                            if (!SetupDiGetDeviceInterfaceDetail(infoSet, ref data, detail, required, ref required, IntPtr.Zero)) continue;
+                            string path = Marshal.PtrToStringUni(new IntPtr(detail.ToInt64() + 4));
+                            if (!String.IsNullOrEmpty(path) && IsLightspeedPath(path)) paths.Add(path);
                         }
                         finally { Marshal.FreeHGlobal(detail); }
                     }
@@ -9573,6 +10192,4406 @@ namespace MXMasterWin
         }
     }
 
+    // ---- Other devices protocol ----
+    // Pure logic for the "Other devices" page: Logitech devices on a Lightspeed receiver (G502 LIGHTSPEED).
+    // Ported from MX Master Mac (OtherDevicesProtocol.swift). No hardware access in this section, so
+    // tools/other-devices-test can compile it alone and compare its output with the Swift version.
+    internal enum OtherDeviceLink { Online, Reading, NoAnswer, ReceiverGone }
+    internal enum OtherChargeState { Discharging, Charging, Full, PluggedNotCharging, Error }
+    internal enum OtherBatterySource { None, Percent, Voltage }
+    internal enum OtherReadPlan { Battery, Full }
+    internal enum OtherButtonKind { Mouse, Key, Consumer, Function, Disabled, Unknown }
+    internal enum OtherLightKind { Off, Fixed, Cycle, Breathe, Unknown }
+    internal enum OtherRegisterKind { Reply, Error, Timeout }
+    internal enum OtherSlotKind { Paired, Empty, Unknown }
+    internal enum OtherOnboardEventKind { ProfileChanged, StageChanged }
+    internal enum OtherWriteModeKind { Patch, Restore, Repair }
+
+    internal enum OtherWriteResult
+    {
+        Written,            // written, read back equal, reloaded
+        WrittenNotApplied,  // written and read back equal, but the reload or stage restore was not confirmed
+        Unchanged,
+        ProfileChanged,     // the mouse is no longer on the profile being edited; nothing written
+        ReadFailed,
+        BackupFailed,
+        UnexpectedContent,
+        LeftClickLocked,
+        NoBackup,
+        FailedUnchanged,    // the write failed and the sector still reads as before
+        FailedRolledBack,   // the write failed and the previous content was written back
+        FailedNeedsRepair   // the write failed and could not be undone; repair when the device returns
+    }
+
+    internal sealed class OtherButtonAssignment : IEquatable<OtherButtonAssignment>
+    {
+        public readonly OtherButtonKind Kind;
+        public readonly int Number;
+        public readonly byte Modifiers;
+        public readonly byte Usage;
+        public readonly ushort Code;
+        public readonly byte FunctionId;
+        private readonly byte[] raw;
+
+        private OtherButtonAssignment(OtherButtonKind kind, int number, byte modifiers, byte usage, ushort code, byte functionId, byte[] raw)
+        {
+            Kind = kind;
+            Number = number;
+            Modifiers = modifiers;
+            Usage = usage;
+            Code = code;
+            FunctionId = functionId;
+            this.raw = raw;
+        }
+
+        public static OtherButtonAssignment Mouse(int number) { return new OtherButtonAssignment(OtherButtonKind.Mouse, number, 0, 0, 0, 0, null); }
+        public static OtherButtonAssignment Key(byte modifiers, byte usage) { return new OtherButtonAssignment(OtherButtonKind.Key, 0, modifiers, usage, 0, 0, null); }
+        public static OtherButtonAssignment Consumer(ushort code) { return new OtherButtonAssignment(OtherButtonKind.Consumer, 0, 0, 0, code, 0, null); }
+        public static OtherButtonAssignment Function(byte id) { return new OtherButtonAssignment(OtherButtonKind.Function, 0, 0, 0, 0, id, null); }
+        public static OtherButtonAssignment Disabled() { return new OtherButtonAssignment(OtherButtonKind.Disabled, 0, 0, 0, 0, 0, null); }
+        public static OtherButtonAssignment Unknown(byte[] bytes) { return new OtherButtonAssignment(OtherButtonKind.Unknown, 0, 0, 0, 0, 0, (byte[])bytes.Clone()); }
+
+        public static OtherButtonAssignment Parse(byte[] b)
+        {
+            if (b.Length < 4) return Unknown(b);
+            byte[] head = new byte[4];
+            Array.Copy(b, head, 4);
+            if (b[0] == 0x80 && b[1] == 0x01)
+            {
+                int mask = b[2] << 8 | b[3];
+                if (mask != 0 && (mask & (mask - 1)) == 0)
+                {
+                    int bit = 0;
+                    while ((mask >> bit & 1) == 0) bit++;
+                    return Mouse(bit + 1);
+                }
+                return Unknown(head);
+            }
+            if (b[0] == 0x80 && b[1] == 0x02) return Key(b[2], b[3]);
+            if (b[0] == 0x80 && b[1] == 0x03) return Consumer((ushort)(b[2] << 8 | b[3]));
+            if (b[0] == 0x80 && b[1] == 0x00) return Disabled();
+            if (b[0] == 0x90) return Function(b[1]);
+            return Unknown(head);
+        }
+
+        public byte[] Bytes
+        {
+            get
+            {
+                switch (Kind)
+                {
+                    case OtherButtonKind.Mouse:
+                        int mask = 1 << (Number - 1);
+                        return new byte[] { 0x80, 0x01, (byte)(mask >> 8 & 0xFF), (byte)(mask & 0xFF) };
+                    case OtherButtonKind.Key: return new byte[] { 0x80, 0x02, Modifiers, Usage };
+                    case OtherButtonKind.Consumer: return new byte[] { 0x80, 0x03, (byte)(Code >> 8), (byte)(Code & 0xFF) };
+                    case OtherButtonKind.Disabled: return new byte[] { 0x80, 0x00, 0x00, 0x00 };
+                    case OtherButtonKind.Function: return new byte[] { 0x90, FunctionId, 0x00, 0x00 };
+                    default: return (byte[])raw.Clone();
+                }
+            }
+        }
+
+        // "Hand to the app": button 6 and up. The mouse sends that button and the app runs the chosen action.
+        public int? AppButton
+        {
+            get
+            {
+                if (Kind == OtherButtonKind.Mouse && Number >= 6) return Number;
+                return null;
+            }
+        }
+
+        public bool Equals(OtherButtonAssignment other)
+        {
+            if (ReferenceEquals(other, null) || other.Kind != Kind) return false;
+            return OtherDevicesProtocol.SameBytes(Bytes, other.Bytes);
+        }
+
+        public override bool Equals(object obj) { return Equals(obj as OtherButtonAssignment); }
+
+        public override int GetHashCode()
+        {
+            int hash = (int)Kind;
+            foreach (byte b in Bytes) hash = hash * 31 + b;
+            return hash;
+        }
+    }
+
+    // One lighting zone. Period is in milliseconds, brightness 1-100.
+    internal sealed class OtherLightEffect : IEquatable<OtherLightEffect>
+    {
+        public readonly OtherLightKind Kind;
+        public readonly byte R;
+        public readonly byte G;
+        public readonly byte B;
+        public readonly int Period;
+        public readonly int Brightness;
+        private readonly byte[] raw;
+
+        private OtherLightEffect(OtherLightKind kind, byte r, byte g, byte b, int period, int brightness, byte[] raw)
+        {
+            Kind = kind;
+            R = r;
+            G = g;
+            B = b;
+            Period = period;
+            Brightness = brightness;
+            this.raw = raw;
+        }
+
+        public static OtherLightEffect Off() { return new OtherLightEffect(OtherLightKind.Off, 0, 0, 0, 0, 0, null); }
+        public static OtherLightEffect Fixed(byte r, byte g, byte b) { return new OtherLightEffect(OtherLightKind.Fixed, r, g, b, 0, 0, null); }
+        public static OtherLightEffect Cycle(int period, int brightness) { return new OtherLightEffect(OtherLightKind.Cycle, 0, 0, 0, period, brightness, null); }
+        public static OtherLightEffect Breathe(byte r, byte g, byte b, int period, int brightness) { return new OtherLightEffect(OtherLightKind.Breathe, r, g, b, period, brightness, null); }
+        public static OtherLightEffect Unknown(byte[] bytes) { return new OtherLightEffect(OtherLightKind.Unknown, 0, 0, 0, 0, 0, (byte[])bytes.Clone()); }
+
+        public static OtherLightEffect Parse(byte[] b)
+        {
+            if (b.Length < 11) return Unknown(b);
+            switch (b[0])
+            {
+                case 0x00: return Off();
+                case 0x01: return Fixed(b[1], b[2], b[3]);
+                // Brightness 0 means 100% (libratbag hidpp20_led_cycle / breath).
+                case 0x03: return Cycle(b[6] << 8 | b[7], b[8] == 0 ? 100 : b[8]);
+                case 0x0A: return Breathe(b[1], b[2], b[3], b[4] << 8 | b[5], b[7] == 0 ? 100 : b[7]);
+                default:
+                    byte[] head = new byte[11];
+                    Array.Copy(b, head, 11);
+                    return Unknown(head);
+            }
+        }
+
+        public byte[] Bytes
+        {
+            get
+            {
+                if (Kind == OtherLightKind.Unknown) return (byte[])raw.Clone();
+                byte[] b = new byte[11];
+                switch (Kind)
+                {
+                    case OtherLightKind.Fixed:
+                        b[0] = 0x01; b[1] = R; b[2] = G; b[3] = B;
+                        break;
+                    case OtherLightKind.Cycle:
+                        b[0] = 0x03; b[6] = (byte)(Period >> 8 & 0xFF); b[7] = (byte)(Period & 0xFF);
+                        b[8] = (byte)Math.Min(Math.Max(Brightness, 1), 100);
+                        break;
+                    case OtherLightKind.Breathe:
+                        b[0] = 0x0A; b[1] = R; b[2] = G; b[3] = B;
+                        b[4] = (byte)(Period >> 8 & 0xFF); b[5] = (byte)(Period & 0xFF);
+                        b[7] = (byte)Math.Min(Math.Max(Brightness, 1), 100);
+                        break;
+                }
+                return b;
+            }
+        }
+
+        public bool Equals(OtherLightEffect other)
+        {
+            if (ReferenceEquals(other, null) || other.Kind != Kind) return false;
+            if (Kind == OtherLightKind.Unknown) return OtherDevicesProtocol.SameBytes(raw, other.raw);
+            return R == other.R && G == other.G && B == other.B && Period == other.Period && Brightness == other.Brightness;
+        }
+
+        public override bool Equals(object obj) { return Equals(obj as OtherLightEffect); }
+
+        public override int GetHashCode()
+        {
+            return (int)Kind * 31 + (R << 16 | G << 8 | B) * 17 + Period * 7 + Brightness;
+        }
+    }
+
+    internal sealed class OtherDeviceSnapshot
+    {
+        public string Receiver = "";     // receiver identity (PID + location); with the slot it forms the id
+        public int Slot;
+        public string Name = "";
+        public int Kind = -1;            // 0x0005 fn2: 0 keyboard, 3 mouse, 4 trackball, 5 touchpad; -1 unknown
+        public string Wpid = "";
+        public OtherDeviceLink Link = OtherDeviceLink.Online;
+        public OtherBatterySource BatterySource = OtherBatterySource.None;
+        public int BatteryPercent = -1;
+        public int Millivolts;
+        public bool Charging;
+        public bool Full;
+        public string Firmware = "";
+        public int Dpi;
+        public int DpiMin;
+        public int DpiMax;
+        public int ReportRateMs;
+        public int OnboardMode;          // 1 onboard profiles, 2 host control, 0 no such feature
+        public int ProfileCount;
+        public int BatterySeq;           // counts successful battery readings, so old data is not counted twice
+        public OtherChargeState ChargeState = OtherChargeState.Discharging;
+        public bool FastCharge;
+        public bool SlowCharge;
+        public DateTime? LastSeen;
+        public int ActiveProfile;
+        public List<int> Profiles = new List<int>();
+        public List<int> DpiStages = new List<int>();
+        public int StageIndex = -1;
+        public int ButtonCount;
+        public int SectorSize;
+        public List<OtherButtonAssignment> Buttons = new List<OtherButtonAssignment>();
+        public int DefaultStage = -1;
+        public List<OtherLightEffect> Lights = new List<OtherLightEffect>();
+        public string UnitId = "";       // 0x0003 serial; tells two mice of the same model apart
+        public int? RepairSector;        // a profile whose last write did not finish
+        public List<int> ProfileSlots = new List<int>();   // every directory entry, disabled ones too; device numbers index this list
+        public bool OnboardFormatOK;     // memory, profile and macro formats are ones libratbag knows
+
+        public string BackupKey { get { return OtherProfileBackups.DeviceKey(Wpid, UnitId); } }
+        public string Id { get { return Receiver + "#" + Slot; } }
+        public string ReceiverPid { get { return Receiver.Length <= 4 ? Receiver : Receiver.Substring(0, 4); } }
+        public bool IsPointing { get { return Kind == 3 || Kind == 4 || Kind == 5; } }
+
+        // Writing is open only to models verified on hardware, with a known format.
+        public bool WriteVerified
+        {
+            get { return OnboardFormatOK && Array.IndexOf(OtherDevicesProtocol.WriteVerifiedModels, Wpid) >= 0; }
+        }
+
+        // Editable: a verified model, online, in onboard mode, on a writable profile (0x01xx is ROM) with a button table.
+        public bool CanEditButtons
+        {
+            get { return WriteVerified && Link == OtherDeviceLink.Online && OnboardMode == 1 && ActiveProfile >= 1 && ActiveProfile < 0x100 && Buttons.Count > 0 && SectorSize >= 0x50; }
+        }
+
+        public bool CanSwitchStage
+        {
+            get
+            {
+                if (Link != OtherDeviceLink.Online || OnboardMode != 1) return false;
+                foreach (int stage in DpiStages) if (stage > 0) return true;
+                return false;
+            }
+        }
+
+        public int? ProfileNumber
+        {
+            get
+            {
+                int index = Profiles.IndexOf(ActiveProfile);
+                if (index < 0) return null;
+                return index + 1;
+            }
+        }
+
+        public OtherDeviceSnapshot Copy()
+        {
+            OtherDeviceSnapshot c = (OtherDeviceSnapshot)MemberwiseClone();
+            c.Profiles = new List<int>(Profiles);
+            c.ProfileSlots = new List<int>(ProfileSlots);
+            c.DpiStages = new List<int>(DpiStages);
+            c.Buttons = new List<OtherButtonAssignment>(Buttons);
+            c.Lights = new List<OtherLightEffect>(Lights);
+            return c;
+        }
+    }
+
+    internal sealed class OtherVoltageInfo
+    {
+        public int Millivolts;
+        public OtherChargeState State;
+        public bool Fast;
+        public bool Slow;
+    }
+
+    internal sealed class OtherBatteryInfo
+    {
+        public int Percent;
+        public OtherChargeState State;
+        public bool Slow;
+    }
+
+    internal sealed class OtherOnboardEvent
+    {
+        public OtherOnboardEventKind Kind;
+        public int Stage;
+    }
+
+    internal sealed class OtherRegisterOutcome
+    {
+        public OtherRegisterKind Kind;
+        public byte[] Reply;
+        public static OtherRegisterOutcome FromReply(byte[] reply) { return new OtherRegisterOutcome { Kind = OtherRegisterKind.Reply, Reply = reply }; }
+        public static OtherRegisterOutcome Error() { return new OtherRegisterOutcome { Kind = OtherRegisterKind.Error }; }
+        public static OtherRegisterOutcome Timeout() { return new OtherRegisterOutcome { Kind = OtherRegisterKind.Timeout }; }
+    }
+
+    internal sealed class OtherSlotState
+    {
+        public OtherSlotKind Kind;
+        public string Wpid = "";
+        public int DeviceKind;
+    }
+
+    internal sealed class OtherLowBatteryResult
+    {
+        public int Below;
+        public bool Notified;
+        public bool Notify;
+    }
+
+    // Per-device low battery state. Seq is the battery reading counter, so a re-published cache
+    // does not count as a second reading; a different WPID means the slot holds another device.
+    internal sealed class OtherLowBatteryState
+    {
+        public string Wpid = "";
+        public int Seq = -1;
+        public int Below;
+        public bool Notified;
+        public OtherLowBatteryState Copy() { return (OtherLowBatteryState)MemberwiseClone(); }
+    }
+
+    internal sealed class OtherWriteStep
+    {
+        public byte Function;
+        public byte[] Parameters;
+    }
+
+    internal static class OtherDevicesProtocol
+    {
+        public const int Vendor = 0x046D;
+        public const byte OnboardSetProfile = 3;
+        public const byte OnboardActiveProfile = 4;
+        public const byte OnboardReadData = 5;
+        public const byte OnboardStageIndex = 0xB;
+        public const byte OnboardSetStage = 0xC;
+        public const double IdleSeconds = 2;
+        public const double QuickIdleSeconds = 0.3;   // the user is waiting for the page: read after a short stop
+        public const double PairingCheckInterval = 300;
+        public const int ButtonTableOffset = 0x20;
+        public const int MaxButtons = 16;
+        public const int LightOffset = 0xD0;
+        public const int LightSize = 11;
+        public static readonly int[] ReportRates = { 1, 2, 4, 8 };
+        // Bolt (C548) and Unifying are handled by the mouse and receiver pages, not here.
+        public static readonly int[] LightspeedReceivers = { 0xC539, 0xC53A, 0xC53D, 0xC53F, 0xC541, 0xC545, 0xC547, 0xC54D, 0xC52B, 0xC52F, 0xC532 };
+        public static readonly byte[] NotificationFlagsRead = { 0x10, 0xFF, 0x81, 0x00, 0, 0, 0 };
+        private static readonly int[,] VoltageTable =
+        {
+            { 4186, 100 }, { 4067, 90 }, { 3989, 80 }, { 3922, 70 }, { 3859, 60 }, { 3811, 50 },
+            { 3778, 40 }, { 3751, 30 }, { 3717, 20 }, { 3671, 10 }, { 3646, 5 }, { 3579, 2 }, { 3500, 0 }
+        };
+
+        public static bool SameBytes(byte[] a, byte[] b)
+        {
+            if (ReferenceEquals(a, b)) return true;
+            if (a == null || b == null || a.Length != b.Length) return false;
+            for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) return false;
+            return true;
+        }
+
+        internal static string TrimControl(string text)
+        {
+            int start = 0, end = text.Length;
+            while (start < end && IsControl(text[start])) start++;
+            while (end > start && IsControl(text[end - 1])) end--;
+            return text.Substring(start, end - start);
+        }
+
+        private static bool IsControl(char c)
+        {
+            var category = char.GetUnicodeCategory(c);
+            return category == System.Globalization.UnicodeCategory.Control || category == System.Globalization.UnicodeCategory.Format;
+        }
+
+        // Receiver registers
+        public static byte[] PairingRequest(int slot) { return new byte[] { 0x10, 0xFF, 0x83, 0xB5, (byte)(0x20 + slot - 1), 0, 0 }; }
+        public static byte[] NameRequest(int slot) { return new byte[] { 0x10, 0xFF, 0x83, 0xB5, (byte)(0x40 + slot - 1), 0, 0 }; }
+
+        public static bool Pairing(byte[] reply, int slot, out string wpid, out int kind)
+        {
+            wpid = "";
+            kind = 0;
+            if (reply == null || reply.Length < 12 || reply[0] != 0x11 || reply[1] != 0xFF || reply[2] != 0x83 || reply[3] != 0xB5 ||
+                reply[4] != (byte)(0x20 + slot - 1)) return false;
+            string id = reply[7].ToString("X2") + reply[8].ToString("X2");
+            if (id == "0000") return false;
+            wpid = id;
+            kind = reply[11] & 0x0F;
+            return true;
+        }
+
+        public static string PairedName(byte[] reply, int slot)
+        {
+            if (reply == null || reply.Length < 7 || reply[0] != 0x11 || reply[2] != 0x83 || reply[3] != 0xB5 || reply[4] != (byte)(0x40 + slot - 1)) return "";
+            int length = Math.Min(reply[5], reply.Length - 6);
+            if (length <= 0) return "";
+            try { return TrimControl(new UTF8Encoding(false, true).GetString(reply, 6, length)); }
+            catch (ArgumentException) { return ""; }
+        }
+
+        // HID++ 1.0 type from the receiver -> HID++ 2.0 type (0x0005).
+        public static int KindFromReceiver(int kind)
+        {
+            switch (kind)
+            {
+                case 1: return 0;
+                case 2: return 3;
+                case 8: return 4;
+                case 9: return 5;
+                default: return -1;
+            }
+        }
+
+        // Receiver connection notice (10 slot 41 protocol flags ...): flag bit 6 = link lost.
+        public static bool ConnectionNotice(byte[] bytes, out int slot, out bool connected)
+        {
+            slot = 0;
+            connected = false;
+            if (bytes == null || bytes.Length < 5 || bytes[0] != 0x10 || bytes[2] != 0x41 || bytes[1] < 1 || bytes[1] > 6) return false;
+            slot = bytes[1];
+            connected = (bytes[4] & 0x40) == 0;
+            return true;
+        }
+
+        public static bool? WirelessNoticesOn(byte[] reply)
+        {
+            if (reply == null || reply.Length < 7 || (reply[0] != 0x10 && reply[0] != 0x11) || reply[1] != 0xFF || reply[2] != 0x81 || reply[3] != 0x00) return null;
+            return (reply[5] & 0x01) != 0;
+        }
+
+        // Turns on only the wireless on/off notice (0x000100); other bits are written back as read.
+        public static byte[] EnableWirelessNotices(byte[] reply)
+        {
+            if (WirelessNoticesOn(reply) != false) return null;
+            return new byte[] { 0x10, 0xFF, 0x80, 0x00, reply[4], (byte)(reply[5] | 0x01), reply[6] };
+        }
+
+        // Battery
+        public static int PercentFromMillivolts(int mv)
+        {
+            int rows = VoltageTable.GetLength(0);
+            if (mv >= VoltageTable[0, 0]) return VoltageTable[0, 1];
+            if (mv <= VoltageTable[rows - 1, 0]) return 0;
+            for (int i = 0; i < rows - 1; i++)
+            {
+                int highMv = VoltageTable[i, 0], highPercent = VoltageTable[i, 1];
+                int lowMv = VoltageTable[i + 1, 0], lowPercent = VoltageTable[i + 1, 1];
+                if (mv > lowMv && mv <= highMv)
+                {
+                    double ratio = (double)(mv - lowMv) / (highMv - lowMv);
+                    return lowPercent + (int)Math.Round(ratio * (highPercent - lowPercent), MidpointRounding.AwayFromZero);
+                }
+            }
+            return 0;
+        }
+
+        // 0x1001 fn0 reply or event: voltage (big-endian) + flags. Bit 7 = external power; then the low
+        // three bits are 0 charging, 1 full, 2 plugged but not charging, others error; bit 3 fast, bit 4 slow.
+        public static OtherVoltageInfo VoltageInfo(byte[] bytes)
+        {
+            if (bytes == null || bytes.Length < 7) return null;
+            int mv = bytes[4] << 8 | bytes[5];
+            if (mv <= 0) return null;
+            byte flags = bytes[6];
+            if ((flags & 0x80) == 0) return new OtherVoltageInfo { Millivolts = mv, State = OtherChargeState.Discharging };
+            OtherChargeState state;
+            switch (flags & 0x07)
+            {
+                case 0: state = OtherChargeState.Charging; break;
+                case 1: state = OtherChargeState.Full; break;
+                case 2: state = OtherChargeState.PluggedNotCharging; break;
+                default: state = OtherChargeState.Error; break;
+            }
+            return new OtherVoltageInfo
+            {
+                Millivolts = mv,
+                State = state,
+                Fast = state == OtherChargeState.Charging && (flags & 0x08) != 0,
+                Slow = state == OtherChargeState.Charging && (flags & 0x10) != 0
+            };
+        }
+
+        // 0x1004 fn1: percent, level, state (0 discharging, 1 charging, 2 slow, 3 full, 4 error).
+        public static OtherBatteryInfo UnifiedBatteryInfo(byte[] bytes)
+        {
+            if (bytes == null || bytes.Length < 7 || bytes[4] > 100) return null;
+            OtherChargeState state;
+            switch (bytes[6])
+            {
+                case 0: state = OtherChargeState.Discharging; break;
+                case 1:
+                case 2: state = OtherChargeState.Charging; break;
+                case 3: state = OtherChargeState.Full; break;
+                default: state = OtherChargeState.Error; break;
+            }
+            return new OtherBatteryInfo { Percent = bytes[4], State = state, Slow = bytes[6] == 2 };
+        }
+
+        // 0x1000 fn0: percent, next level, state (0 discharging, 1 charging, 2 almost full, 3 full, 4 slow, 5-6 errors).
+        public static OtherBatteryInfo BatteryStatusInfo(byte[] bytes)
+        {
+            if (bytes == null || bytes.Length < 7 || bytes[4] > 100) return null;
+            OtherChargeState state;
+            switch (bytes[6])
+            {
+                case 0: state = OtherChargeState.Discharging; break;
+                case 1:
+                case 2:
+                case 4: state = OtherChargeState.Charging; break;
+                case 3: state = OtherChargeState.Full; break;
+                default: state = OtherChargeState.Error; break;
+            }
+            return new OtherBatteryInfo { Percent = bytes[4], State = state, Slow = bytes[6] == 4 };
+        }
+
+        public static int Smoothed(IList<int> samples)
+        {
+            if (samples.Count == 0) return 0;
+            long sum = 0;
+            foreach (int sample in samples) sum += sample;
+            return (int)Math.Round((double)sum / samples.Count, MidpointRounding.AwayFromZero);
+        }
+
+        // DPI, report rate, firmware
+        // 0x2201 fn1 list from byte 5: 2-byte values ending at 0; values with the top three bits set are steps.
+        public static bool DpiRange(byte[] bytes, out int min, out int max)
+        {
+            min = 0;
+            max = 0;
+            bool any = false;
+            for (int i = 5; bytes != null && i + 1 < bytes.Length; i += 2)
+            {
+                int value = bytes[i] << 8 | bytes[i + 1];
+                if (value == 0) break;
+                if (value >> 13 == 7) continue;
+                if (!any || value < min) min = value;
+                if (!any || value > max) max = value;
+                any = true;
+            }
+            return any;
+        }
+
+        public static int CurrentDpi(byte[] bytes)
+        {
+            if (bytes == null || bytes.Length < 9) return 0;
+            int current = bytes[5] << 8 | bytes[6];
+            return current != 0 ? current : bytes[7] << 8 | bytes[8];
+        }
+
+        public static int ReportRateHz(int ms) { return ms > 0 ? 1000 / ms : 0; }
+
+        public static string Firmware(byte[] info)
+        {
+            if (info == null || info.Length < 12 || (info[4] & 0x0F) != 0) return null;
+            bool ascii = info[5] < 0x80 && info[6] < 0x80 && info[7] < 0x80;
+            string name = ascii ? TrimControl(Encoding.ASCII.GetString(info, 5, 3)) : "";
+            return name + " " + info[8].ToString("X2") + "." + info[9].ToString("X2") + ".B" + (info[10] << 8 | info[11]).ToString("X4");
+        }
+
+        // Low battery: two readings in a row at or below the threshold (not charging) before notifying;
+        // charging or rising above threshold + 3 starts over.
+        public static OtherLowBatteryResult LowBattery(int percent, bool charging, int threshold, int below, bool notified, bool alertOn)
+        {
+            if (percent < 0) return new OtherLowBatteryResult { Below = below, Notified = notified };
+            if (charging || percent > threshold + 3) return new OtherLowBatteryResult();
+            if (percent > threshold) return new OtherLowBatteryResult { Notified = notified };
+            int count = below + 1;
+            if (!alertOn || notified || count < 2) return new OtherLowBatteryResult { Below = count, Notified = notified };
+            return new OtherLowBatteryResult { Below = count, Notified = true, Notify = true };
+        }
+
+        public static OtherLowBatteryState LowBatteryStep(OtherLowBatteryState previous, string wpid, int seq, int percent, bool charging, int threshold, bool alertOn, out bool notify)
+        {
+            notify = false;
+            OtherLowBatteryState state = previous != null ? previous.Copy() : new OtherLowBatteryState();
+            if (state.Wpid != wpid) state = new OtherLowBatteryState { Wpid = wpid };
+            if (seq == state.Seq) return state;
+            state.Seq = seq;
+            OtherLowBatteryResult r = LowBattery(percent, charging, threshold, state.Below, state.Notified, alertOn);
+            state.Below = r.Below;
+            state.Notified = r.Notified;
+            notify = r.Notify;
+            return state;
+        }
+
+        // Read timing: every HID++ exchange uses the wireless channel, so read only while the mouse rests.
+        public static bool MouseIdle(IEnumerable<double> secondsSinceEvents, double threshold)
+        {
+            foreach (double seconds in secondsSinceEvents) if (seconds < threshold) return false;
+            return true;
+        }
+
+        public static bool WakeCheckDue(DateTime? lastPing, DateTime now, double secondsSinceMouse)
+        {
+            if (!lastPing.HasValue) return true;
+            double age = (now - lastPing.Value).TotalSeconds;
+            return age >= 60 || (age >= 5 && secondsSinceMouse < 6);
+        }
+
+        public static OtherReadPlan ReadPlan(bool known, bool sameDevice, bool online, bool hasFeatures, bool forceFull)
+        {
+            if (forceFull || !known || !sameDevice || !online || !hasFeatures) return OtherReadPlan.Full;
+            return OtherReadPlan.Battery;
+        }
+
+        // Onboard profiles (0x8100)
+        public static byte[] ReadDataParameters(int sector, int offset)
+        {
+            return new byte[] { (byte)(sector >> 8 & 0xFF), (byte)(sector & 0xFF), (byte)(offset >> 8 & 0xFF), (byte)(offset & 0xFF) };
+        }
+
+        // Directory (sector 0): 4-byte entries [sector hi, sector lo, enabled, ?], ending at 0xFFFF.
+        public static List<int> Directory(byte[] data)
+        {
+            var list = new List<int>();
+            for (int i = 0; i + 3 < data.Length; i += 4)
+            {
+                int sector = data[i] << 8 | data[i + 1];
+                if (sector == 0xFFFF) break;
+                if (data[i + 2] != 0 && sector != 0) list.Add(sector);
+            }
+            return list;
+        }
+
+        // Profile head: [report rate, default stage, shift stage, five stages of 2 bytes little-endian].
+        public static int[] ProfileStages(byte[] data)
+        {
+            if (data == null || data.Length < 13) return null;
+            int[] stages = new int[5];
+            bool any = false;
+            for (int i = 0; i < 5; i++)
+            {
+                int value = data[3 + i * 2] | data[4 + i * 2] << 8;
+                stages[i] = value == 0xFFFF ? 0 : value;
+                if (stages[i] > 0) any = true;
+            }
+            return any ? stages : null;
+        }
+
+        public static int? ActiveProfile(byte[] reply)
+        {
+            if (reply == null || reply.Length < 6) return null;
+            int sector = reply[4] << 8 | reply[5];
+            if (sector == 0) return null;
+            return sector;
+        }
+
+        public static int? StageIndex(byte[] reply)
+        {
+            if (reply == null || reply.Length < 5 || reply[4] >= 5) return null;
+            return reply[4];
+        }
+
+        // Unsolicited 0x8100 events (software ID 0): function 0 profile changed, 1 stage changed.
+        public static OtherOnboardEvent OnboardEvent(byte[] bytes, byte featureIndex)
+        {
+            if (bytes == null || bytes.Length < 5 || bytes[0] != 0x11 || featureIndex == 0 || bytes[2] != featureIndex || (bytes[3] & 0x0F) != 0) return null;
+            switch (bytes[3] >> 4)
+            {
+                case 0: return new OtherOnboardEvent { Kind = OtherOnboardEventKind.ProfileChanged };
+                case 1:
+                    if (bytes[4] >= 5) return null;
+                    return new OtherOnboardEvent { Kind = OtherOnboardEventKind.StageChanged, Stage = bytes[4] };
+                default: return null;
+            }
+        }
+
+        public static int? DpiForStage(int index, IList<int> stages)
+        {
+            if (index < 0 || index >= stages.Count || stages[index] <= 0) return null;
+            return stages[index];
+        }
+
+        // A re-plugged receiver: drop old cards of the same PID from another USB location.
+        public static List<string> StaleAfterReceiverFound(IEnumerable<OtherDeviceSnapshot> devices, string foundKey)
+        {
+            string pid = foundKey.Length <= 4 ? foundKey : foundKey.Substring(0, 4);
+            var stale = new List<string>();
+            foreach (OtherDeviceSnapshot d in devices)
+                if (d.Link == OtherDeviceLink.ReceiverGone && d.ReceiverPid == pid && d.Receiver != foundKey) stale.Add(d.Id);
+            return stale;
+        }
+
+        // 0x0003 fn0 serial (bytes 5-8); all zero or all FF means none.
+        public static string UnitId(byte[] reply)
+        {
+            if (reply == null || reply.Length < 9) return "";
+            bool zero = true, ff = true;
+            var text = new StringBuilder();
+            for (int i = 5; i < 9; i++)
+            {
+                if (reply[i] != 0) zero = false;
+                if (reply[i] != 0xFF) ff = false;
+                text.Append(reply[i].ToString("X2"));
+            }
+            return zero || ff ? "" : text.ToString();
+        }
+
+        // The left button may not be remapped unless the current valid profile already has it that way.
+        public static bool LeftClickSafe(byte[] target, byte[] current)
+        {
+            List<OtherButtonAssignment> left = ProfileButtons(target, 1);
+            if (left.Count == 0) return false;
+            if (left[0].Equals(OtherButtonAssignment.Mouse(1))) return true;
+            if (current == null) return false;
+            List<OtherButtonAssignment> before = ProfileButtons(current, 1);
+            return before.Count > 0 && before[0].Equals(left[0]);
+        }
+
+        public static bool ValidStage(int value, int original, int min, int max, int step = 50)
+        {
+            if (original == 0) return value == 0;
+            return value >= min && value <= max && value % step == 0;
+        }
+
+        public static bool ReconnectReadNeeded(bool online, DateTime? lastFullRead, DateTime now)
+        {
+            if (!online || !lastFullRead.HasValue) return true;
+            return (now - lastFullRead.Value).TotalSeconds > 3;
+        }
+
+        public static bool ReadConfirmsOnline(int timeouts, Func<bool> stillAnswers)
+        {
+            return timeouts == 0 || stillAnswers();
+        }
+
+        public static string AppActionKey(OtherDeviceSnapshot d, int number)
+        {
+            return d.BackupKey + "-" + d.ActiveProfile.ToString("X4") + ":" + number;
+        }
+
+        // Moves old number-only keys to this profile's key. Returns null when nothing changed.
+        public static Dictionary<string, V> MigratedAppActions<V>(Dictionary<string, V> actions, OtherDeviceSnapshot d)
+        {
+            if (d.UnitId.Length == 0 || d.ActiveProfile == 0) return null;
+            var result = new Dictionary<string, V>(actions);
+            bool changed = false;
+            foreach (OtherButtonAssignment button in d.Buttons)
+            {
+                int? number = button.AppButton;
+                if (!number.HasValue) continue;
+                string oldKey = number.Value.ToString();
+                V value;
+                if (!result.TryGetValue(oldKey, out value)) continue;
+                string key = AppActionKey(d, number.Value);
+                if (!result.ContainsKey(key)) result[key] = value;
+                result.Remove(oldKey);
+                changed = true;
+            }
+            return changed ? result : null;
+        }
+
+        // Which device sent this button: prefer the same receiver, then any device whose profile uses it.
+        public static OtherDeviceSnapshot DeviceForAppButton(int number, string receiver, IEnumerable<OtherDeviceSnapshot> list)
+        {
+            OtherButtonAssignment wanted = OtherButtonAssignment.Mouse(number);
+            OtherDeviceSnapshot first = null;
+            foreach (OtherDeviceSnapshot d in list)
+            {
+                if (d.Link != OtherDeviceLink.Online || !d.Buttons.Contains(wanted)) continue;
+                if (d.Receiver == receiver) return d;
+                if (first == null) first = d;
+            }
+            return first;
+        }
+
+        public static OtherSlotState SlotState(OtherRegisterOutcome outcome, int slot)
+        {
+            if (outcome.Kind == OtherRegisterKind.Timeout) return new OtherSlotState { Kind = OtherSlotKind.Unknown };
+            if (outcome.Kind == OtherRegisterKind.Error) return new OtherSlotState { Kind = OtherSlotKind.Empty };
+            byte[] bytes = outcome.Reply;
+            string wpid;
+            int kind;
+            if (Pairing(bytes, slot, out wpid, out kind)) return new OtherSlotState { Kind = OtherSlotKind.Paired, Wpid = wpid, DeviceKind = kind };
+            bool matches = bytes != null && bytes.Length >= 12 && bytes[0] == 0x11 && bytes[1] == 0xFF && bytes[2] == 0x83 &&
+                bytes[3] == 0xB5 && bytes[4] == (byte)(0x20 + slot - 1);
+            return new OtherSlotState { Kind = matches ? OtherSlotKind.Empty : OtherSlotKind.Unknown };
+        }
+
+        // Keep the 0x1D4B index while a device is away: the reconnect event is recognized through it.
+        public static Dictionary<int, byte> FeaturesAfterNoAnswer(Dictionary<int, byte> table)
+        {
+            var result = new Dictionary<int, byte>();
+            byte index;
+            if (table != null && table.TryGetValue(0x1D4B, out index)) result[0x1D4B] = index;
+            return result;
+        }
+
+        public static bool PairingCheckDue(DateTime? last, DateTime now)
+        {
+            if (!last.HasValue) return true;
+            return (now - last.Value).TotalSeconds >= PairingCheckInterval;
+        }
+
+        // Button table at 0x20: 4 bytes each.
+        public static List<OtherButtonAssignment> ProfileButtons(byte[] sector, int count)
+        {
+            var list = new List<OtherButtonAssignment>();
+            int n = Math.Min(Math.Max(count, 0), MaxButtons);
+            for (int i = 0; i < n; i++)
+            {
+                int start = ButtonTableOffset + i * 4;
+                if (start + 4 > sector.Length) break;
+                byte[] raw = new byte[4];
+                Array.Copy(sector, start, raw, 0, 4);
+                list.Add(OtherButtonAssignment.Parse(raw));
+            }
+            return list;
+        }
+
+        // CRC-CCITT (init 0xFFFF, poly 0x1021).
+        public static ushort Crc(byte[] bytes, int length)
+        {
+            ushort c = 0xFFFF;
+            for (int i = 0; i < length; i++)
+            {
+                c ^= (ushort)(bytes[i] << 8);
+                for (int bit = 0; bit < 8; bit++)
+                    c = (c & 0x8000) != 0 ? (ushort)((c << 1) ^ 0x1021) : (ushort)(c << 1);
+            }
+            return c;
+        }
+
+        public static bool CrcValid(byte[] sector)
+        {
+            if (sector == null || sector.Length < 3) return false;
+            int stored = sector[sector.Length - 2] << 8 | sector[sector.Length - 1];
+            return Crc(sector, sector.Length - 2) == stored;
+        }
+
+        private static void StoreCrc(byte[] sector)
+        {
+            ushort c = Crc(sector, sector.Length - 2);
+            sector[sector.Length - 2] = (byte)(c >> 8);
+            sector[sector.Length - 1] = (byte)(c & 0xFF);
+        }
+
+        // The whole profile with new buttons and CRC; null when the current CRC is wrong.
+        public static byte[] PatchedProfile(byte[] sector, Dictionary<int, OtherButtonAssignment> buttons)
+        {
+            if (sector == null || sector.Length <= ButtonTableOffset + 4 || !CrcValid(sector)) return null;
+            OtherButtonAssignment left;
+            if (buttons.TryGetValue(0, out left) && !left.Equals(OtherButtonAssignment.Mouse(1))) return null;
+            byte[] result = (byte[])sector.Clone();
+            foreach (KeyValuePair<int, OtherButtonAssignment> item in buttons)
+            {
+                int start = ButtonTableOffset + item.Key * 4;
+                byte[] raw = item.Value.Bytes;
+                if (item.Key < 0 || item.Key >= MaxButtons || raw.Length != 4 || start + 4 > result.Length - 2) return null;
+                Array.Copy(raw, 0, result, start, 4);
+            }
+            StoreCrc(result);
+            return result;
+        }
+
+        // fn6 [sector, offset, length], fn7 16 bytes at a time, fn8 finish.
+        public static List<OtherWriteStep> WritePlan(int sector, byte[] data)
+        {
+            var plan = new List<OtherWriteStep>();
+            plan.Add(new OtherWriteStep
+            {
+                Function = 6,
+                Parameters = new byte[] { (byte)(sector >> 8 & 0xFF), (byte)(sector & 0xFF), 0, 0, (byte)(data.Length >> 8 & 0xFF), (byte)(data.Length & 0xFF) }
+            });
+            for (int start = 0; start < data.Length; start += 16)
+            {
+                byte[] chunk = new byte[Math.Min(16, data.Length - start)];
+                Array.Copy(data, start, chunk, 0, chunk.Length);
+                plan.Add(new OtherWriteStep { Function = 7, Parameters = chunk });
+            }
+            plan.Add(new OtherWriteStep { Function = 8, Parameters = new byte[0] });
+            return plan;
+        }
+
+        // 16 bytes per read; the last read is aligned back so it does not run past the sector.
+        public static List<int> ReadOffsets(int sectorSize)
+        {
+            var list = new List<int>();
+            if (sectorSize < 16)
+            {
+                list.Add(0);
+                return list;
+            }
+            for (int offset = 0; offset < sectorSize; offset += 16) list.Add(Math.Min(offset, sectorSize - 16));
+            return list;
+        }
+
+        // The lowest of buttons 6-16 this profile does not use yet.
+        public static int? FreeAppButton(IList<OtherButtonAssignment> buttons, int exceptIndex)
+        {
+            var used = new HashSet<int>();
+            for (int i = 0; i < buttons.Count; i++)
+            {
+                int? number = buttons[i].AppButton;
+                if (i != exceptIndex && number.HasValue) used.Add(number.Value);
+            }
+            for (int n = 6; n <= 16; n++) if (!used.Contains(n)) return n;
+            return null;
+        }
+
+        // G502 LIGHTSPEED (WPID 407F) button names in profile order; other devices use "Button N".
+        public static string[] ButtonName(string wpid, int index)
+        {
+            string[,] g502 =
+            {
+                { "左鍵", "Left button" }, { "右鍵", "Right button" }, { "滾輪按下", "Wheel click" },
+                { "上一頁（G4）", "Back (G4)" }, { "下一頁（G5）", "Forward (G5)" }, { "狙擊（G6）", "Sniper (G6)" },
+                { "DPI 下（G7）", "DPI down (G7)" }, { "DPI 上（G8）", "DPI up (G8)" }, { "G9 鍵", "G9 button" },
+                { "滾輪右撥", "Wheel tilt right" }, { "滾輪左撥", "Wheel tilt left" }
+            };
+            if (wpid == "407F" && index >= 0 && index < g502.GetLength(0)) return new[] { g502[index, 0], g502[index, 1] };
+            return new[] { "第 " + (index + 1) + " 鍵", "Button " + (index + 1) };
+        }
+
+        // New stages and default stage; unused stages stay 0 and used stages cannot become 0.
+        public static byte[] PatchedStages(byte[] sector, IList<int> stages, int? defaultIndex, int min, int max, int step = 50)
+        {
+            if (sector == null || sector.Length < 16 || !CrcValid(sector) || stages.Count != 5 || min <= 0 || max < min) return null;
+            byte[] result = (byte[])sector.Clone();
+            for (int i = 0; i < 5; i++)
+            {
+                int value = stages[i];
+                if (value == 0)
+                {
+                    if (sector[3 + i * 2] != 0 || sector[4 + i * 2] != 0) return null;
+                    continue;
+                }
+                if (value < min || value > max || value % step != 0) return null;
+                result[3 + i * 2] = (byte)(value & 0xFF);
+                result[4 + i * 2] = (byte)(value >> 8 & 0xFF);
+            }
+            if (defaultIndex.HasValue)
+            {
+                int d = defaultIndex.Value;
+                if (d < 0 || d >= 5 || stages[d] == 0) return null;
+                result[1] = (byte)d;
+            }
+            StoreCrc(result);
+            return result;
+        }
+
+        public static byte[] PatchedReportRate(byte[] sector, int ms)
+        {
+            if (sector == null || sector.Length < 16 || !CrcValid(sector) || Array.IndexOf(ReportRates, ms) < 0) return null;
+            byte[] result = (byte[])sector.Clone();
+            result[0] = (byte)ms;
+            StoreCrc(result);
+            return result;
+        }
+
+        public static int? DefaultStage(byte[] head)
+        {
+            if (head == null || head.Length < 2 || head[1] >= 5) return null;
+            return head[1];
+        }
+
+        // Lighting at 0xD0: 11 bytes per zone (G502: 0 primary, 1 G logo).
+        public static List<OtherLightEffect> ProfileLights(byte[] sector, int zones = 2)
+        {
+            var list = new List<OtherLightEffect>();
+            for (int i = 0; i < zones; i++)
+            {
+                int start = LightOffset + i * LightSize;
+                if (start + LightSize > sector.Length) continue;
+                byte[] raw = new byte[LightSize];
+                Array.Copy(sector, start, raw, 0, LightSize);
+                list.Add(OtherLightEffect.Parse(raw));
+            }
+            return list;
+        }
+
+        // Models whose write flow was verified on hardware. Others are read-only; switching stage or profile still works.
+        public static readonly string[] WriteVerifiedModels = { "407F" };
+
+        // 0x8100 fn0: [memory model, profile format, macro format, ...]. libratbag accepts only 1, 1-5 and 1.
+        public static bool OnboardFormatSupported(byte[] info)
+        {
+            return info != null && info.Length >= 7 && info[4] == 1 && info[5] >= 1 && info[5] <= 5 && info[6] == 1;
+        }
+
+        // Every directory entry, disabled ones too, up to 0xFFFF. Device profile numbers index this list.
+        public static List<int> DirectoryEntries(byte[] data)
+        {
+            var list = new List<int>();
+            for (int i = 0; i + 3 < data.Length; i += 4)
+            {
+                int sector = data[i] << 8 | data[i + 1];
+                if (sector == 0xFFFF) break;
+                list.Add(sector);
+            }
+            return list;
+        }
+
+        // fn4 reply -> active sector. libratbag: byte 5 is the number, counted from 1 on INDEX_OFFSET models and
+        // from 0 on the others. Unlisted models are not guessed. A non-zero high byte (ROM) is used as is only
+        // on models counting from 1 (G502 reports 0x0101).
+        public static int? ResolvedActiveProfile(byte[] reply, string wpid, IList<int> slots)
+        {
+            OtherDeviceModel model;
+            if (reply == null || reply.Length < 6 || !OtherDeviceCatalog.Models.TryGetValue(wpid, out model)) return null;
+            int raw = reply[4] << 8 | reply[5];
+            if (reply[4] != 0)
+            {
+                if (model.OneBasedProfile) return raw;
+                return null;
+            }
+            int number = reply[5];
+            int index = model.OneBasedProfile && number > 0 ? number - 1 : number;
+            if (index < slots.Count) return slots[index];
+            if (model.OneBasedProfile && slots.Count == 0 && number > 0) return raw;
+            return null;
+        }
+
+        // fn3: libratbag always sends [0, position + 1]; a sector outside the directory (ROM) is sent as is.
+        public static byte[] SetProfileParameters(int sector, IList<int> slots)
+        {
+            int index = slots.IndexOf(sector);
+            if (index >= 0 && index < 255) return new byte[] { 0, (byte)(index + 1) };
+            return new byte[] { (byte)(sector >> 8 & 0xFF), (byte)(sector & 0xFF) };
+        }
+
+        public static int[] LightSlots(string wpid)
+        {
+            OtherDeviceModel model;
+            if (OtherDeviceCatalog.Models.TryGetValue(wpid, out model) && model.SecondLightSlot) return new[] { 1 };
+            return new[] { 0, 1 };
+        }
+
+        public static List<OtherLightEffect> ProfileLights(byte[] sector, string wpid)
+        {
+            List<OtherLightEffect> all = ProfileLights(sector, 2);
+            var list = new List<OtherLightEffect>();
+            foreach (int slot in LightSlots(wpid)) if (slot < all.Count) list.Add(all[slot]);
+            return list;
+        }
+
+        // Fills in a name or type the receiver did not give.
+        public static void ApplyCatalog(OtherDeviceSnapshot d)
+        {
+            OtherDeviceModel model;
+            if (!OtherDeviceCatalog.Models.TryGetValue(d.Wpid, out model)) return;
+            if (d.Name.Length == 0) d.Name = model.Name;
+            if (d.Kind < 0) d.Kind = model.Kind;
+        }
+
+        public static byte[] PatchedLights(byte[] sector, Dictionary<int, OtherLightEffect> lights)
+        {
+            if (sector == null || sector.Length < LightOffset + 2 * LightSize + 2 || !CrcValid(sector)) return null;
+            byte[] result = (byte[])sector.Clone();
+            foreach (KeyValuePair<int, OtherLightEffect> item in lights)
+            {
+                byte[] raw = item.Value.Bytes;
+                if (item.Key < 0 || item.Key >= 2 || raw.Length != LightSize) return null;
+                Array.Copy(raw, 0, result, LightOffset + item.Key * LightSize, LightSize);
+            }
+            StoreCrc(result);
+            return result;
+        }
+    }
+
+    // Re-checks the mouse before every HID++ exchange: wait while it moves, and give up on this
+    // batch if it keeps moving, so a long read never runs under an active cursor.
+    internal sealed class OtherReadGate
+    {
+        public bool Interrupted { get; private set; }
+
+        public void Begin() { Interrupted = false; }
+
+        public bool Allow(Func<bool> idle, Action<double> wait, double maxWait = 3, double step = 0.2)
+        {
+            if (Interrupted) return false;
+            double waited = 0;
+            while (!idle())
+            {
+                if (waited >= maxWait)
+                {
+                    Interrupted = true;
+                    return false;
+                }
+                wait(step);
+                waited += step;
+            }
+            return true;
+        }
+    }
+
+    // Receiver scans waiting for the mouse to stop: one per receiver; a full read request wins.
+    internal sealed class OtherScanQueue
+    {
+        private sealed class Entry { public bool Full; public ulong Token; }
+        private readonly Dictionary<string, Entry> queued = new Dictionary<string, Entry>();
+        private ulong nextToken;
+
+        public bool Request(string key, bool full)
+        {
+            Entry existing;
+            if (queued.TryGetValue(key, out existing))
+            {
+                existing.Full = existing.Full || full;
+                return false;
+            }
+            nextToken++;
+            queued[key] = new Entry { Full = full, Token = nextToken };
+            return true;
+        }
+
+        public ulong? Token(string key)
+        {
+            Entry entry;
+            if (!queued.TryGetValue(key, out entry)) return null;
+            return entry.Token;
+        }
+
+        public bool? Take(string key)
+        {
+            Entry entry;
+            if (!queued.TryGetValue(key, out entry)) return null;
+            queued.Remove(key);
+            return entry.Full;
+        }
+
+        public bool? Take(string key, ulong token)
+        {
+            Entry entry;
+            if (!queued.TryGetValue(key, out entry) || entry.Token != token) return null;
+            queued.Remove(key);
+            return entry.Full;
+        }
+    }
+
+    // Rotating software IDs. A timed-out ID is held back so its late reply cannot answer the next request.
+    internal sealed class OtherRequestIds
+    {
+        public const double Hold = 5;
+        private byte next = 1;
+        private readonly Dictionary<byte, double> quarantine = new Dictionary<byte, double>();
+
+        public byte Take(double now)
+        {
+            foreach (byte key in new List<byte>(quarantine.Keys))
+                if (quarantine[key] <= now) quarantine.Remove(key);
+            for (int i = 0; i < 15; i++)
+            {
+                byte id = next;
+                next = next >= 0x0F ? (byte)1 : (byte)(next + 1);
+                if (!quarantine.ContainsKey(id)) return id;
+            }
+            byte soonest = 1;
+            double best = double.MaxValue;
+            foreach (KeyValuePair<byte, double> item in quarantine)
+            {
+                if (item.Value < best)
+                {
+                    best = item.Value;
+                    soonest = item.Key;
+                }
+            }
+            quarantine.Remove(soonest);
+            return soonest;
+        }
+
+        public void TimedOut(byte id, double now) { quarantine[id] = now + Hold; }
+    }
+
+    internal sealed class OtherWriteMode
+    {
+        public OtherWriteModeKind Kind;
+        public Func<byte[], byte[]> Patch;
+        public byte[] Image;
+        public static OtherWriteMode Patched(Func<byte[], byte[]> patch) { return new OtherWriteMode { Kind = OtherWriteModeKind.Patch, Patch = patch }; }
+        public static OtherWriteMode Restore(byte[] image) { return new OtherWriteMode { Kind = OtherWriteModeKind.Restore, Image = image }; }
+        public static OtherWriteMode Repair(byte[] image) { return new OtherWriteMode { Kind = OtherWriteModeKind.Repair, Image = image }; }
+    }
+
+    internal sealed class OtherProfileIO
+    {
+        public Func<int?> ActiveSector;
+        public Func<int, byte[]> Read;
+        public Func<byte, byte[], bool> Command;   // 0x8100 function and parameters; true only when answered
+        public Func<byte[], bool> Backup;
+        public Func<bool> Reload;
+    }
+
+    internal sealed class OtherWriteOutcome
+    {
+        public OtherWriteResult Result;
+        public byte[] Target;
+        public byte[] RepairImage;   // for FailedNeedsRepair: the content to write back later
+        public OtherWriteOutcome(OtherWriteResult result, byte[] target = null, byte[] repairImage = null)
+        {
+            Result = result;
+            Target = target;
+            RepairImage = repairImage;
+        }
+    }
+
+    internal static class OtherProfileWriter
+    {
+        // Stops at the first unanswered step and never sends "finish" for unconfirmed data.
+        public static bool Transfer(int sector, byte[] data, OtherProfileIO io)
+        {
+            foreach (OtherWriteStep step in OtherDevicesProtocol.WritePlan(sector, data))
+                if (!io.Command(step.Function, step.Parameters)) return false;
+            return true;
+        }
+
+        public static OtherWriteOutcome Run(int sector, OtherWriteMode mode, OtherProfileIO io)
+        {
+            bool isRepair = mode.Kind == OtherWriteModeKind.Repair;
+            if (!isRepair && io.ActiveSector() != sector) return new OtherWriteOutcome(OtherWriteResult.ProfileChanged);
+            byte[] current = io.Read(sector);
+            bool currentValid = current != null && OtherDevicesProtocol.CrcValid(current);
+
+            byte[] target;
+            if (mode.Kind == OtherWriteModeKind.Patch)
+            {
+                if (!currentValid) return new OtherWriteOutcome(OtherWriteResult.ReadFailed);
+                target = mode.Patch(current);
+                if (target == null) return new OtherWriteOutcome(OtherWriteResult.UnexpectedContent);
+            }
+            else
+            {
+                byte[] image = mode.Image;
+                if (image == null || !OtherDevicesProtocol.CrcValid(image) || (current != null && image.Length != current.Length))
+                    return new OtherWriteOutcome(OtherWriteResult.NoBackup);
+                target = image;
+            }
+            if (!OtherDevicesProtocol.LeftClickSafe(target, currentValid ? current : null))
+                return new OtherWriteOutcome(OtherWriteResult.LeftClickLocked);
+            if (OtherDevicesProtocol.SameBytes(target, current)) return new OtherWriteOutcome(OtherWriteResult.Unchanged, target);
+            // Only valid content is worth a backup; damaged content must not block a restore.
+            if (currentValid && !io.Backup(current)) return new OtherWriteOutcome(OtherWriteResult.BackupFailed);
+            // Reading a whole sector takes a moment, so confirm the profile again before writing.
+            if (!isRepair && io.ActiveSector() != sector) return new OtherWriteOutcome(OtherWriteResult.ProfileChanged);
+
+            Transfer(sector, target, io);
+            byte[] verify = io.Read(sector);
+            if (OtherDevicesProtocol.SameBytes(verify, target))
+                return new OtherWriteOutcome(io.Reload() ? OtherWriteResult.Written : OtherWriteResult.WrittenNotApplied, target);
+            if (verify != null && OtherDevicesProtocol.SameBytes(verify, current)) return new OtherWriteOutcome(OtherWriteResult.FailedUnchanged);
+            if (!currentValid) return new OtherWriteOutcome(OtherWriteResult.FailedNeedsRepair, null, target);
+            Transfer(sector, current, io);
+            if (OtherDevicesProtocol.SameBytes(io.Read(sector), current)) return new OtherWriteOutcome(OtherWriteResult.FailedRolledBack);
+            return new OtherWriteOutcome(OtherWriteResult.FailedNeedsRepair, null, current);
+        }
+    }
+
+    // Profile backups, one set per physical device (WPID + serial). Existing files are never
+    // overwritten, and each new file is read back before it counts as saved.
+    internal sealed class OtherProfileBackups
+    {
+        private readonly string folder;
+
+        public OtherProfileBackups(string folder) { this.folder = folder; }
+
+        public static string DeviceKey(string wpid, string unitId) { return unitId.Length == 0 ? wpid : wpid + "-" + unitId; }
+
+        public string OriginalPath(string device, int sector) { return Path.Combine(folder, device + "-" + sector.ToString("X4") + "-original.bin"); }
+        public string RepairPath(string device, int sector) { return Path.Combine(folder, device + "-" + sector.ToString("X4") + "-repair.bin"); }
+
+        public byte[] LoadImage(string path, int size)
+        {
+            try
+            {
+                byte[] raw = File.ReadAllBytes(path);
+                return raw.Length == size && OtherDevicesProtocol.CrcValid(raw) ? raw : null;
+            }
+            catch (IOException) { return null; }
+            catch (UnauthorizedAccessException) { return null; }
+        }
+
+        private bool WriteNew(byte[] data, string path)
+        {
+            string temp = Path.Combine(folder, ".tmp-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                File.WriteAllBytes(temp, data);
+                File.Move(temp, path);   // fails when the destination exists, so nothing is overwritten
+                return OtherDevicesProtocol.SameBytes(File.ReadAllBytes(path), data);
+            }
+            catch (IOException) { TryDelete(temp); return false; }
+            catch (UnauthorizedAccessException) { TryDelete(temp); return false; }
+        }
+
+        private static void TryDelete(string path)
+        {
+            try { File.Delete(path); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+
+        private bool EnsureFolder()
+        {
+            try
+            {
+                System.IO.Directory.CreateDirectory(folder);
+                return true;
+            }
+            catch (IOException) { return false; }
+            catch (UnauthorizedAccessException) { return false; }
+        }
+
+        // Keeps the first "original" of this profile, plus a timestamped copy before every write.
+        public bool Save(byte[] data, string device, int sector, DateTime now)
+        {
+            if (!EnsureFolder()) return false;
+            string original = OriginalPath(device, sector);
+            if (!File.Exists(original) && !WriteNew(data, original)) return false;
+            string stem = device + "-" + sector.ToString("X4") + "-" + now.ToString("yyyyMMdd-HHmmss-fff", System.Globalization.CultureInfo.InvariantCulture);
+            for (int attempt = 0; attempt < 100; attempt++)
+            {
+                string path = Path.Combine(folder, stem + (attempt == 0 ? "" : "-" + attempt) + ".bin");
+                if (File.Exists(path)) continue;
+                return WriteNew(data, path);
+            }
+            return false;
+        }
+
+        // An existing repair image is kept: it is the last content known to be good.
+        public bool SaveRepair(byte[] data, string device, int sector)
+        {
+            if (!EnsureFolder()) return false;
+            string path = RepairPath(device, sector);
+            if (File.Exists(path)) return true;
+            return WriteNew(data, path);
+        }
+
+        public void ClearRepair(string device, int sector) { TryDelete(RepairPath(device, sector)); }
+
+        private string[] FileNames()
+        {
+            try
+            {
+                string[] paths = System.IO.Directory.GetFiles(folder);
+                for (int i = 0; i < paths.Length; i++) paths[i] = Path.GetFileName(paths[i]);
+                return paths;
+            }
+            catch (IOException) { return new string[0]; }
+            catch (UnauthorizedAccessException) { return new string[0]; }
+        }
+
+        private static bool ParseHex(string text, out int value)
+        {
+            return int.TryParse(text, System.Globalization.NumberStyles.AllowHexSpecifier, System.Globalization.CultureInfo.InvariantCulture, out value);
+        }
+
+        public int? PendingRepair(string device)
+        {
+            string prefix = device + "-", suffix = "-repair.bin";
+            int? lowest = null;
+            foreach (string name in FileNames())
+            {
+                if (name.Length <= prefix.Length + suffix.Length || !name.StartsWith(prefix, StringComparison.Ordinal) || !name.EndsWith(suffix, StringComparison.Ordinal)) continue;
+                int sector;
+                if (!ParseHex(name.Substring(prefix.Length, name.Length - prefix.Length - suffix.Length), out sector)) continue;
+                if (!lowest.HasValue || sector < lowest.Value) lowest = sector;
+            }
+            return lowest;
+        }
+
+        // Older backups were named by WPID only: the first device that reports a serial adopts them.
+        public void AdoptLegacy(string wpid, string unitId)
+        {
+            if (unitId.Length == 0) return;
+            string prefix = wpid + "-", suffix = "-original.bin";
+            foreach (string name in FileNames())
+            {
+                if (name.Length != prefix.Length + 4 + suffix.Length || !name.StartsWith(prefix, StringComparison.Ordinal) || !name.EndsWith(suffix, StringComparison.Ordinal)) continue;
+                int sector;
+                if (!ParseHex(name.Substring(prefix.Length, 4), out sector)) continue;
+                string target = OriginalPath(DeviceKey(wpid, unitId), sector);
+                if (File.Exists(target)) continue;
+                try { File.Move(Path.Combine(folder, name), target); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+        }
+    }
+    // BEGIN GENERATED device catalog
+    // Generated by tools/other-devices-test/catalog.py; do not edit. Source: libratbag 1aec93b2f810 (MIT), see THIRD_PARTY_NOTICES.md.
+    internal sealed class OtherDeviceModel
+    {
+        public string Name;
+        public int Kind;
+        public bool OneBasedProfile;   // INDEX_OFFSET: the active profile number counts from 1
+        public bool SecondLightSlot;   // G502X_PLUS: lighting is in the second slot
+    }
+
+    internal static class OtherDeviceCatalog
+    {
+        public const string Source = "libratbag 1aec93b2f810 (MIT)";
+        private static OtherDeviceModel M(string name, int kind, bool oneBased, bool second)
+        {
+            return new OtherDeviceModel { Name = name, Kind = kind, OneBasedProfile = oneBased, SecondLightSlot = second };
+        }
+
+        public static readonly Dictionary<string, OtherDeviceModel> Models = new Dictionary<string, OtherDeviceModel>
+        {
+            { "400A", M("Logitech M325", 3, false, false) },
+            { "4011", M("Logitech Wireless Touchpad", 3, false, false) },
+            { "402C", M("Logitech G602", 3, false, false) },
+            { "4041", M("Logitech MX Master", 3, false, false) },
+            { "404A", M("Logitech MX Anywhere 2", 3, false, false) },
+            { "4052", M("Logitech M545", 3, false, false) },
+            { "4053", M("Logitech G900", 3, false, false) },
+            { "405D", M("Logitech G403 Wireless", 3, false, false) },
+            { "405E", M("Logitech M720", 3, false, false) },
+            { "405F", M("Logitech G Powerplay", -1, false, false) },
+            { "4060", M("Logitech MX Master", 3, false, false) },
+            { "4063", M("Logitech MX Anywhere 2", 3, false, false) },
+            { "4067", M("Logitech G903", 3, false, false) },
+            { "4069", M("Logitech MX Master 2S", 3, false, false) },
+            { "406A", M("Logitech MX Anywhere 2S", 3, false, false) },
+            { "406B", M("Logitech M585/M590", 3, false, false) },
+            { "406C", M("Logitech G603", 3, false, false) },
+            { "406D", M("Logitech Marathon M705", 3, false, false) },
+            { "406F", M("Logitech MX Ergo", 3, false, false) },
+            { "4070", M("Logitech G703", 3, false, false) },
+            { "4071", M("Logitech MX Master", 3, false, false) },
+            { "4072", M("Logitech MX Anywhere 2", 3, false, false) },
+            { "4074", M("Logitech Gaming Mouse G305", 3, false, false) },
+            { "4079", M("Logitech G Pro Wireless", 3, false, false) },
+            { "407B", M("Logitech MX Vertical", 3, false, false) },
+            { "407F", M("Logitech G502 Hero Wireless", 3, true, false) },
+            { "4082", M("Logitech MX Master 3", 3, false, false) },
+            { "4085", M("Logitech G604", 3, true, false) },
+            { "4086", M("Logitech G703 Hero", 3, false, false) },
+            { "4087", M("Logitech G903 Hero", 3, false, false) },
+            { "4090", M("Logitech MX Anywhere 3", 3, false, false) },
+            { "4093", M("Logitech G Pro X Wireless Superlight", 3, false, false) },
+            { "4099", M("Logitech G502 X PLUS", 3, true, true) },
+            { "409D", M("Logitech G705", 3, false, true) },
+            { "409F", M("Logitech G502 X Wireless", 3, true, false) },
+        };
+    }
+    // END GENERATED device catalog
+
+    // ---- Other devices protocol end ----
+
+    // ---- Other devices I/O ----
+    // A receiver's HID++ collections; tools/other-devices-test replaces this with a fake receiver.
+    internal interface IOtherPort : IDisposable
+    {
+        string Key { get; }                 // PID + location, e.g. C539@8&2EE1690F&0
+        event Action<byte[]> Received;      // raised on a reader thread
+        event Action Closed;                // the receiver was unplugged
+        void Start();
+        bool Write(byte[] packet);
+    }
+
+    // Devices on Lightspeed receivers (G502 LIGHTSPEED), ported from MX Master Mac (OtherDevices.swift).
+    // Separate handles, thread and queue from the MX Master 4 and keyboard code, so those connections are unaffected.
+    // Every exchange uses the wireless channel, so nothing is sent while the mouse moves, except what the
+    // user asked for and what the receiver answers itself. Connected devices normally read only the battery.
+    internal sealed class OtherDevicesManager : IDisposable
+    {
+        private const double BatteryInterval = 300;
+
+        private sealed class WriteRequest
+        {
+            public Func<byte[], OtherDeviceSnapshot, byte[]> Patch;
+            public bool RestoreOriginal;
+            public bool Repair;
+        }
+
+        private readonly Func<ICollection<string>, List<IOtherPort>> discover;
+        private readonly Func<double> secondsSinceMouse;
+        private readonly Action<Action> postToUi;
+        private readonly OtherProfileBackups backups;
+        private readonly System.Collections.Concurrent.BlockingCollection<Action> queue =
+            new System.Collections.Concurrent.BlockingCollection<Action>();
+        private readonly object portLock = new object();
+        private readonly List<IOtherPort> ports = new List<IOtherPort>();
+        private Thread thread;
+        private System.Threading.Timer timer;
+        private int tickQueued;
+        private volatile bool stopped;
+        private bool disposed;
+
+        // Everything below is used only on the worker thread.
+        private readonly Dictionary<string, OtherDeviceSnapshot> devices = new Dictionary<string, OtherDeviceSnapshot>();
+        private readonly Dictionary<string, Dictionary<int, byte>> features = new Dictionary<string, Dictionary<int, byte>>();
+        private readonly Dictionary<string, List<int>> samples = new Dictionary<string, List<int>>();
+        private readonly Dictionary<string, DateTime> lastBattery = new Dictionary<string, DateTime>();
+        private readonly Dictionary<string, DateTime> lastScan = new Dictionary<string, DateTime>();
+        private readonly Dictionary<string, DateTime> lastPing = new Dictionary<string, DateTime>();
+        private readonly Dictionary<string, DateTime> lastLightTry = new Dictionary<string, DateTime>();
+        private readonly Dictionary<string, DateTime> lastFullRead = new Dictionary<string, DateTime>();
+        private readonly HashSet<string> reconnectPending = new HashSet<string>();
+        private readonly OtherRequestIds requestIds = new OtherRequestIds();
+        private readonly OtherReadGate gate = new OtherReadGate();
+        private readonly OtherScanQueue scanQueue = new OtherScanQueue();
+        private double idleNeeded = OtherDevicesProtocol.IdleSeconds;
+        private int timeouts;
+        private int sent;
+
+        // The request waiting for its reply; shared with the reader threads.
+        private readonly object pendingLock = new object();
+        private IOtherPort pendingPort;
+        private byte[] pendingKey;
+        private byte[] pendingReply;
+        private bool pendingError;
+        private ManualResetEventSlim pendingSignal;
+
+        public event Action<string> Log;
+        public event Action<List<OtherDeviceSnapshot>> Changed;
+        // (wpid, button slot, pressed) from HID++ 0x8110, on the UI thread.
+        public event Action<string, int, bool> ButtonChanged;
+        public event Action ButtonsLost;
+
+        // 0x8110 state. The indexes and masks are also read on the receiver's reader thread.
+        private readonly object spyLock = new object();
+        private readonly Dictionary<string, byte> spyIndexes = new Dictionary<string, byte>();
+        private readonly Dictionary<string, int> spyMasks = new Dictionary<string, int>();
+        private readonly Dictionary<string, string> spyWpids = new Dictionary<string, string>();
+        private readonly Dictionary<string, DateTime> lastSpyArm = new Dictionary<string, DateTime>();
+        private bool spyWanted;
+
+        public OtherDevicesManager(Func<ICollection<string>, List<IOtherPort>> discover, Func<double> secondsSinceMouse,
+            Action<Action> postToUi, string backupFolder)
+        {
+            this.discover = discover;
+            this.secondsSinceMouse = secondsSinceMouse;
+            this.postToUi = postToUi;
+            backups = new OtherProfileBackups(backupFolder);
+        }
+
+        public void Start()
+        {
+            thread = new Thread(Run) { IsBackground = true, Name = "MXMasterWin Other Devices" };
+            thread.Start();
+            Post(Discover);
+            timer = new System.Threading.Timer(delegate
+            {
+                if (Interlocked.CompareExchange(ref tickQueued, 1, 0) == 0) Post(TimerTick);
+            }, null, 5000, 5000);
+        }
+
+        private void Run()
+        {
+            foreach (Action action in queue.GetConsumingEnumerable())
+            {
+                try { action(); }
+                catch (Exception ex) { WriteLog("worker error: " + ex.GetType().Name + ": " + ex.Message); }
+            }
+        }
+
+        private void Post(Action action)
+        {
+            try { queue.Add(action); }
+            catch (InvalidOperationException) { }
+        }
+
+        private void After(int milliseconds, Action action)
+        {
+            System.Threading.Timer once = null;
+            once = new System.Threading.Timer(delegate
+            {
+                if (once != null) once.Dispose();
+                Post(action);
+            }, null, milliseconds, Timeout.Infinite);
+        }
+
+        private List<IOtherPort> PortList()
+        {
+            lock (portLock) return new List<IOtherPort>(ports);
+        }
+
+        private IOtherPort PortFor(string key)
+        {
+            foreach (IOtherPort port in PortList()) if (port.Key == key) return port;
+            return null;
+        }
+
+        private bool HasPort(IOtherPort port)
+        {
+            lock (portLock) return ports.Contains(port);
+        }
+
+        // The settings page opened or the computer woke up: scan again. Full is the Refresh button.
+        public void Refresh(bool full = false)
+        {
+            Post(delegate
+            {
+                if (stopped) return;
+                foreach (IOtherPort port in PortList())
+                    if (full || Age(lastScan, port.Key) > 3) RequestScan(port, full, 30, 3);
+            });
+        }
+
+        private static double Age(Dictionary<string, DateTime> table, string key)
+        {
+            DateTime when;
+            if (!table.TryGetValue(key, out when)) return double.MaxValue;
+            return (DateTime.UtcNow - when).TotalSeconds;
+        }
+
+        // Scans once the mouse stops. One scan per receiver is queued; a scan cut short by the mouse is retried.
+        private void RequestScan(IOtherPort port, bool full, double giveUpAfter, int retry)
+        {
+            string key = port.Key;
+            if (!scanQueue.Request(key, full)) return;
+            ulong? queuedToken = scanQueue.Token(key);
+            if (!queuedToken.HasValue) return;
+            ulong token = queuedToken.Value;
+            WhenIdle(giveUpAfter, true, delegate { scanQueue.Take(key, token); }, delegate
+            {
+                bool? wantFull = scanQueue.Take(key, token);
+                if (!wantFull.HasValue || !HasPort(port)) return;
+                if (!Scan(port, wantFull.Value) && retry > 0) RequestScan(port, wantFull.Value, 60, retry - 1);
+            });
+        }
+
+        private void WhenIdle(double giveUpAfter, bool quick, Action onGiveUp, Action action)
+        {
+            DateTime limit = DateTime.UtcNow.AddSeconds(giveUpAfter);
+            double threshold = quick ? OtherDevicesProtocol.QuickIdleSeconds : OtherDevicesProtocol.IdleSeconds;
+            Action attempt = null;
+            attempt = delegate
+            {
+                if (stopped) return;
+                if (MouseIdle(threshold))
+                {
+                    idleNeeded = threshold;
+                    action();
+                    idleNeeded = OtherDevicesProtocol.IdleSeconds;
+                }
+                else if (DateTime.UtcNow < limit) After(quick ? 250 : 1000, attempt);
+                else if (onGiveUp != null) onGiveUp();
+            };
+            attempt();
+        }
+
+        private bool MouseIdle(double threshold)
+        {
+            return OtherDevicesProtocol.MouseIdle(new[] { secondsSinceMouse() }, threshold);
+        }
+
+        // Receivers appearing and disappearing
+        private void Discover()
+        {
+            if (stopped) return;
+            var open = new List<string>();
+            foreach (IOtherPort port in PortList()) open.Add(port.Key);
+            List<IOtherPort> found;
+            try { found = discover(open); }
+            catch (Exception ex)
+            {
+                WriteLog("receiver search failed: " + ex.Message);
+                return;
+            }
+            foreach (IOtherPort port in found) AddPort(port);
+        }
+
+        private void AddPort(IOtherPort port)
+        {
+            lock (portLock) ports.Add(port);
+            port.Received += delegate (byte[] bytes) { OnReceived(port, bytes); };
+            port.Closed += delegate { Post(delegate { RemovePort(port); }); };
+            port.Start();
+            string key = port.Key;
+            WriteLog("Lightspeed receiver " + key + " found");
+            // Plugged into another USB port: its location differs, so the old "not connected" card goes.
+            foreach (string id in OtherDevicesProtocol.StaleAfterReceiverFound(new List<OtherDeviceSnapshot>(devices.Values), key)) Forget(id);
+            EnableConnectionNotices(port);
+            ListPaired(port);
+            RequestScan(port, false, 120, 3);
+        }
+
+        // Turns on the receiver's online/offline notices. The receiver answers itself, nothing goes over the air.
+        private void EnableConnectionNotices(IOtherPort port)
+        {
+            byte[] read = OtherDevicesProtocol.NotificationFlagsRead;
+            byte[] key = { read[1], read[2], read[3] };
+            OtherRegisterOutcome first = Send(port, read, key, 1000, true);
+            bool? on = first.Kind == OtherRegisterKind.Reply ? OtherDevicesProtocol.WirelessNoticesOn(first.Reply) : null;
+            if (!on.HasValue)
+            {
+                WriteLog("receiver connection notices: couldn't read flags");
+                return;
+            }
+            if (on.Value)
+            {
+                WriteLog("receiver connection notices already on");
+                return;
+            }
+            byte[] write = OtherDevicesProtocol.EnableWirelessNotices(first.Reply);
+            if (write == null) return;
+            Send(port, write, new[] { write[1], write[2], write[3] }, 1000, true);
+            OtherRegisterOutcome check = Send(port, read, key, 1000, true);
+            bool verified = check.Kind == OtherRegisterKind.Reply && OtherDevicesProtocol.WirelessNoticesOn(check.Reply) == true;
+            WriteLog("receiver connection notices enabled verified=" + verified);
+        }
+
+        // Lists the paired devices right away (the receiver answers, no radio), shown as "reading".
+        private void ListPaired(IOtherPort port)
+        {
+            string key = port.Key;
+            for (int slot = 1; slot <= 6; slot++)
+            {
+                string id = key + "#" + slot;
+                OtherSlotState state = OtherDevicesProtocol.SlotState(Register(port, OtherDevicesProtocol.PairingRequest(slot)), slot);
+                if (state.Kind != OtherSlotKind.Paired) continue;
+                OtherDeviceSnapshot known;
+                if (devices.TryGetValue(id, out known) && known.Wpid == state.Wpid)
+                {
+                    if (known.Link == OtherDeviceLink.ReceiverGone)
+                    {
+                        OtherDeviceSnapshot back = known.Copy();
+                        back.Link = OtherDeviceLink.Reading;
+                        devices[id] = back;
+                    }
+                    continue;
+                }
+                var card = new OtherDeviceSnapshot
+                {
+                    Receiver = key,
+                    Slot = slot,
+                    Wpid = state.Wpid,
+                    Kind = OtherDevicesProtocol.KindFromReceiver(state.DeviceKind),
+                    Link = OtherDeviceLink.Reading
+                };
+                OtherRegisterOutcome named = Register(port, OtherDevicesProtocol.NameRequest(slot));
+                if (named.Kind == OtherRegisterKind.Reply) card.Name = OtherDevicesProtocol.PairedName(named.Reply, slot);
+                OtherDevicesProtocol.ApplyCatalog(card);
+                Forget(id);
+                devices[id] = card;
+                WriteLog("other device slot " + slot + " listed: " + card.Name + " wpid=" + state.Wpid);
+            }
+            Publish();
+        }
+
+        private void RemovePort(IOtherPort gone)
+        {
+            lock (portLock)
+            {
+                if (!ports.Remove(gone)) return;
+            }
+            string key = gone.Key;
+            scanQueue.Take(key);
+            reconnectPending.Remove(key);
+            // Keep the cards as "receiver not connected"; plugging it back in reads everything again.
+            foreach (KeyValuePair<string, OtherDeviceSnapshot> item in new List<KeyValuePair<string, OtherDeviceSnapshot>>(devices))
+            {
+                if (item.Value.Receiver != key) continue;
+                OtherDeviceSnapshot d = item.Value.Copy();
+                d.Link = OtherDeviceLink.ReceiverGone;
+                devices[item.Key] = d;
+                ReleaseHeld(item.Key);
+                lastSpyArm.Remove(item.Key);
+                features.Remove(item.Key);
+                samples.Remove(item.Key);
+            }
+            try { gone.Dispose(); }
+            catch { }
+            WriteLog("Lightspeed receiver " + key + " removed");
+            Publish();
+        }
+
+        private void Forget(string id)
+        {
+            ForgetButtonReports(id);
+            devices.Remove(id);
+            features.Remove(id);
+            samples.Remove(id);
+            lastBattery.Remove(id);
+            lastPing.Remove(id);
+            lastLightTry.Remove(id);
+            lastFullRead.Remove(id);
+        }
+
+        // Reconnect notices (0x41, 0x1D4B) merge into one read; a device read moments ago is not read again.
+        private void DeviceCameBack(IOtherPort source, int slot)
+        {
+            string key = source.Key, id = key + "#" + slot;
+            // The mouse may have forgotten the button reports while it was away.
+            if (spyWanted)
+                After(400, delegate
+                {
+                    if (stopped) return;
+                    IOtherPort back = PortFor(key);
+                    if (back != null) ArmButtonReports(back, id);
+                });
+            Func<bool> needed = delegate
+            {
+                OtherDeviceSnapshot d;
+                bool online = devices.TryGetValue(id, out d) && d.Link == OtherDeviceLink.Online;
+                DateTime when;
+                DateTime? last = lastFullRead.TryGetValue(id, out when) ? when : (DateTime?)null;
+                return OtherDevicesProtocol.ReconnectReadNeeded(online, last, DateTime.UtcNow);
+            };
+            if (!needed() || !reconnectPending.Add(key)) return;
+            After(500, delegate
+            {
+                reconnectPending.Remove(key);
+                if (stopped || !needed()) return;
+                IOtherPort port = PortFor(key);
+                if (port != null) RequestScan(port, true, 60, 3);
+            });
+        }
+
+        // Button reports (HID++ 0x8110). They only tell us what is pressed: the mouse's mode, profile and
+        // button mapping stay as they are. Sent as user actions so a moving mouse doesn't hold them up.
+        public void SetButtonReports(bool wanted)
+        {
+            Post(delegate
+            {
+                if (stopped || spyWanted == wanted) return;
+                spyWanted = wanted;
+                if (!wanted)
+                {
+                    StopButtonReports();
+                    return;
+                }
+                foreach (KeyValuePair<string, OtherDeviceSnapshot> item in new List<KeyValuePair<string, OtherDeviceSnapshot>>(devices))
+                {
+                    IOtherPort port = PortFor(item.Value.Receiver);
+                    if (port != null) ArmButtonReports(port, item.Key);
+                }
+            });
+        }
+
+        private void ArmButtonReports(IOtherPort port, string id)
+        {
+            OtherDeviceSnapshot d;
+            if (!spyWanted || stopped || !devices.TryGetValue(id, out d) || d.Link != OtherDeviceLink.Online || d.Wpid != "407F") return;
+            byte? index = FindFeature(port, id, d.Slot, 0x8110);
+            if (!index.HasValue) return;
+            bool first;
+            lock (spyLock)
+            {
+                first = !spyIndexes.ContainsKey(id);
+                spyIndexes[id] = index.Value;   // known before the start, so the first press is not lost
+                spyWpids[id] = d.Wpid;
+                if (first) spyMasks[id] = 0;
+            }
+            bool ok = Hidpp(port, d.Slot, index.Value, 1, new byte[0], 1000, true) != null;
+            if (ok) lastSpyArm[id] = DateTime.UtcNow;
+            if (first || !ok) WriteLog("other device " + d.Name + " button reports on ok=" + ok);
+        }
+
+        private void StopButtonReports()
+        {
+            List<KeyValuePair<string, byte>> armed;
+            lock (spyLock) armed = new List<KeyValuePair<string, byte>>(spyIndexes);
+            foreach (KeyValuePair<string, byte> item in armed)
+            {
+                OtherDeviceSnapshot d;
+                IOtherPort port = devices.TryGetValue(item.Key, out d) ? PortFor(d.Receiver) : null;
+                if (port != null && d.Link == OtherDeviceLink.Online)
+                {
+                    bool ok = Hidpp(port, d.Slot, item.Value, 2, new byte[0], 800, true) != null;
+                    WriteLog("other device " + d.Name + " button reports off ok=" + ok);
+                }
+                ForgetButtonReports(item.Key);
+            }
+        }
+
+        private void ReleaseHeld(string id)
+        {
+            bool held;
+            lock (spyLock)
+            {
+                int mask;
+                held = spyMasks.TryGetValue(id, out mask) && mask != 0;
+                if (spyMasks.ContainsKey(id)) spyMasks[id] = 0;
+            }
+            Action handler = ButtonsLost;
+            if (held && handler != null) postToUi(delegate { handler(); });
+        }
+
+        private void ForgetButtonReports(string id)
+        {
+            ReleaseHeld(id);
+            lock (spyLock)
+            {
+                spyIndexes.Remove(id);
+                spyMasks.Remove(id);
+                spyWpids.Remove(id);
+            }
+            lastSpyArm.Remove(id);
+        }
+
+        // Runs on the reader thread, so a press is not held up by a slow wireless read on the worker.
+        private bool HandleButtonReport(IOtherPort source, byte[] bytes)
+        {
+            if (bytes[0] != 0x11 || bytes[3] != 0) return false;
+            string id = source.Key + "#" + bytes[1], wpid;
+            int mask = bytes[4] << 8 | bytes[5], old;
+            lock (spyLock)
+            {
+                byte index;
+                if (!spyIndexes.TryGetValue(id, out index) || index != bytes[2]) return false;
+                spyMasks.TryGetValue(id, out old);
+                spyMasks[id] = mask;
+                spyWpids.TryGetValue(id, out wpid);
+            }
+            Action<string, int, bool> handler = ButtonChanged;
+            if (handler == null) return true;
+            int changed = old ^ mask;
+            for (int bit = 0; bit < 16; bit++)
+            {
+                if ((changed >> bit & 1) == 0) continue;
+                int button = bit;
+                bool down = (mask >> bit & 1) != 0;
+                postToUi(delegate { handler(wpid, button, down); });
+            }
+            return true;
+        }
+
+        // Timed reads
+        private void TimerTick()
+        {
+            Interlocked.Exchange(ref tickQueued, 0);
+            if (stopped) return;
+            Discover();
+            bool waiting = false;
+            foreach (OtherDeviceSnapshot d in devices.Values)
+                if (d.Link == OtherDeviceLink.NoAnswer || d.Link == OtherDeviceLink.Reading) waiting = true;
+            WhenIdle(waiting ? 1.5 : 4, waiting, null, Tick);
+        }
+
+        private void Tick()
+        {
+            if (stopped) return;
+            // A mouse that slept without any notice may have dropped its button reports.
+            if (spyWanted)
+                foreach (KeyValuePair<string, OtherDeviceSnapshot> armed in new List<KeyValuePair<string, OtherDeviceSnapshot>>(devices))
+                {
+                    if (armed.Value.Link != OtherDeviceLink.Online || Age(lastSpyArm, armed.Key) < 60) continue;
+                    IOtherPort armPort = PortFor(armed.Value.Receiver);
+                    if (armPort != null) ArmButtonReports(armPort, armed.Key);
+                }
+            // Checks the pairing list every five minutes, counted from the last finished scan.
+            var due = new List<IOtherPort>();
+            foreach (IOtherPort port in PortList())
+            {
+                DateTime when;
+                DateTime? last = lastScan.TryGetValue(port.Key, out when) ? when : (DateTime?)null;
+                if (OtherDevicesProtocol.PairingCheckDue(last, DateTime.UtcNow)) due.Add(port);
+            }
+            if (due.Count > 0)
+            {
+                foreach (IOtherPort port in due)
+                {
+                    bool? queuedFull = scanQueue.Take(port.Key);
+                    if (!Scan(port, queuedFull ?? false)) break;
+                }
+                return;
+            }
+            gate.Begin();
+            bool changed = false;
+            foreach (KeyValuePair<string, OtherDeviceSnapshot> item in new List<KeyValuePair<string, OtherDeviceSnapshot>>(devices))
+            {
+                if (gate.Interrupted) break;
+                string id = item.Key;
+                OtherDeviceSnapshot snapshot = item.Value;
+                IOtherPort port = PortFor(snapshot.Receiver);
+                if (port == null) continue;
+                if (snapshot.Link == OtherDeviceLink.NoAnswer || snapshot.Link == OtherDeviceLink.Reading)
+                {
+                    if (scanQueue.Token(port.Key).HasValue || reconnectPending.Contains(port.Key)) continue;
+                    DateTime when;
+                    DateTime? pinged = lastPing.TryGetValue(id, out when) ? when : (DateTime?)null;
+                    if (!OtherDevicesProtocol.WakeCheckDue(pinged, DateTime.UtcNow, secondsSinceMouse())) continue;
+                    lastPing[id] = DateTime.UtcNow;
+                    if (Ping(port, snapshot.Slot))
+                    {
+                        ReadDevice(port, snapshot.Slot, snapshot);
+                        changed = true;
+                    }
+                    else if (snapshot.Link == OtherDeviceLink.Reading && !gate.Interrupted)
+                    {
+                        MarkNoAnswer(id);
+                        changed = true;
+                    }
+                }
+                else if (Age(lastBattery, id) >= BatteryInterval && Age(lastLightTry, id) >= 60)
+                {
+                    lastLightTry[id] = DateTime.UtcNow;
+                    ReadLight(port, id);
+                    changed = true;
+                }
+            }
+            if (changed) Publish();
+        }
+
+        // A connected device: battery plus DPI and report rate. No answer at all marks it as away.
+        private void ReadLight(IOtherPort port, string id)
+        {
+            OtherDeviceSnapshot snapshot;
+            if (!devices.TryGetValue(id, out snapshot)) return;
+            int before = sent;
+            if (ReadBattery(port, id)) ReadSpeed(port, id);
+            else if (!gate.Interrupted && !Ping(port, snapshot.Slot) && !gate.Interrupted) MarkNoAnswer(id);
+            if (gate.Interrupted) return;
+            OtherDeviceSnapshot d;
+            if (!devices.TryGetValue(id, out d)) d = snapshot;
+            WriteLog("other device " + d.Name + " battery read (" + (sent - before) + " requests): " + d.BatteryPercent + "% " + d.Millivolts + "mV dpi=" + d.Dpi);
+        }
+
+        // Returns false when the mouse moved and the scan stopped early.
+        private bool Scan(IOtherPort port, bool full)
+        {
+            string key = port.Key;
+            gate.Begin();
+            for (int slot = 1; slot <= 6; slot++)
+            {
+                string id = key + "#" + slot;
+                OtherRegisterOutcome outcome = Register(port, OtherDevicesProtocol.PairingRequest(slot));
+                if (gate.Interrupted) break;
+                OtherSlotState state = OtherDevicesProtocol.SlotState(outcome, slot);
+                if (state.Kind == OtherSlotKind.Empty)
+                {
+                    if (devices.ContainsKey(id)) Forget(id);
+                    continue;
+                }
+                if (state.Kind == OtherSlotKind.Unknown) continue;   // keep the card: we don't know
+
+                OtherDeviceSnapshot existing;
+                OtherDeviceSnapshot card = devices.TryGetValue(id, out existing) ? existing.Copy() : new OtherDeviceSnapshot();
+                card.Receiver = key;
+                card.Slot = slot;
+                if (card.Wpid != state.Wpid)
+                {
+                    Forget(id);
+                    card = new OtherDeviceSnapshot { Receiver = key, Slot = slot };
+                }
+                card.Wpid = state.Wpid;
+                if (card.Kind < 0 || card.Name.Length == 0) card.Kind = OtherDevicesProtocol.KindFromReceiver(state.DeviceKind);
+                if (card.Name.Length == 0)
+                {
+                    OtherRegisterOutcome named = Register(port, OtherDevicesProtocol.NameRequest(slot));
+                    if (named.Kind == OtherRegisterKind.Reply) card.Name = OtherDevicesProtocol.PairedName(named.Reply, slot);
+                }
+                OtherDevicesProtocol.ApplyCatalog(card);
+                if (gate.Interrupted) break;
+                bool known = devices.TryGetValue(id, out existing);
+                Dictionary<int, byte> table;
+                bool hasFeatures = features.TryGetValue(id, out table) && table.Count > 0;
+                OtherReadPlan plan = OtherDevicesProtocol.ReadPlan(known, true, known && existing.Link == OtherDeviceLink.Online, hasFeatures, full);
+                if (plan == OtherReadPlan.Battery)
+                {
+                    devices[id] = card;
+                    if (Age(lastBattery, id) > 30) ReadLight(port, id);
+                }
+                else if (Ping(port, slot)) ReadDevice(port, slot, card);
+                else if (!gate.Interrupted)
+                {
+                    card.Link = OtherDeviceLink.NoAnswer;
+                    devices[id] = card;
+                    WriteLog("other device slot " + slot + " (" + card.Name + ") paired but not answering");
+                }
+                if (gate.Interrupted) break;
+            }
+            bool done = !gate.Interrupted;
+            if (done) lastScan[key] = DateTime.UtcNow;
+            else WriteLog("scan of " + key + " interrupted: mouse moving (" + sent + " requests so far)");
+            Publish();
+            return done;
+        }
+
+        private void MarkNoAnswer(string id)
+        {
+            OtherDeviceSnapshot current;
+            if (!devices.TryGetValue(id, out current) || current.Link == OtherDeviceLink.NoAnswer) return;
+            OtherDeviceSnapshot snapshot = current.Copy();
+            snapshot.Link = OtherDeviceLink.NoAnswer;
+            devices[id] = snapshot;
+            ReleaseHeld(id);
+            lastSpyArm.Remove(id);
+            // Look features up again next time, but keep 0x1D4B so the reconnect event is recognized.
+            Dictionary<int, byte> table;
+            features.TryGetValue(id, out table);
+            features[id] = OtherDevicesProtocol.FeaturesAfterNoAnswer(table);
+            WriteLog("other device " + snapshot.Name + " not answering");
+        }
+
+        private static string DecodeName(List<byte> bytes)
+        {
+            try { return OtherDevicesProtocol.TrimControl(new UTF8Encoding(false, true).GetString(bytes.ToArray())); }
+            catch (ArgumentException) { return ""; }
+        }
+
+        private void ReadDevice(IOtherPort port, int slot, OtherDeviceSnapshot paired)
+        {
+            if (!HasPort(port)) return;
+            int before = sent, timeoutsBefore = timeouts;
+            string id = paired.Id;
+            if (!features.ContainsKey(id)) features[id] = new Dictionary<int, byte>();
+            OtherDeviceSnapshot s = paired.Copy();
+            s.Link = OtherDeviceLink.Online;
+            byte[] count = Call(port, id, slot, 0x0005, 0);
+            if (count != null)
+            {
+                var name = new List<byte>();
+                int length = Math.Min((int)count[4], 64);
+                while (name.Count < length)
+                {
+                    byte[] piece = Call(port, id, slot, 0x0005, 1, new[] { (byte)name.Count });
+                    if (piece == null) break;
+                    int take = Math.Min(Math.Min(piece.Length, 20) - 4, length - name.Count);
+                    if (take <= 0) break;
+                    for (int i = 0; i < take; i++) name.Add(piece[4 + i]);
+                }
+                string fullName = DecodeName(name);
+                if (fullName.Length > 0) s.Name = fullName;
+                byte[] type = Call(port, id, slot, 0x0005, 2);
+                if (type != null) s.Kind = type[4];
+            }
+            count = Call(port, id, slot, 0x0003, 0);
+            if (count != null)
+            {
+                string unit = OtherDevicesProtocol.UnitId(count);
+                if (unit.Length > 0) s.UnitId = unit;
+                int entries = Math.Min((int)count[4], 8);
+                for (int i = 0; i < entries; i++)
+                {
+                    byte[] info = Call(port, id, slot, 0x0003, 1, new[] { (byte)i });
+                    string text = info != null ? OtherDevicesProtocol.Firmware(info) : null;
+                    if (text != null)
+                    {
+                        s.Firmware = text;
+                        break;
+                    }
+                }
+            }
+            byte[] list = Call(port, id, slot, 0x2201, 1, new byte[] { 0 });
+            int low, high;
+            if (list != null && OtherDevicesProtocol.DpiRange(list, out low, out high))
+            {
+                s.DpiMin = low;
+                s.DpiMax = high;
+            }
+            byte[] current = Call(port, id, slot, 0x2201, 2, new byte[] { 0 });
+            if (current != null) s.Dpi = OtherDevicesProtocol.CurrentDpi(current);
+            byte[] rate = Call(port, id, slot, 0x8060, 1);
+            if (rate != null) s.ReportRateMs = rate[4];
+            byte[] onboard = Call(port, id, slot, 0x8100, 0);
+            if (onboard != null)
+            {
+                s.ProfileCount = onboard[7];
+                s.ButtonCount = onboard[9];
+                s.SectorSize = onboard[11] << 8 | onboard[12];
+                s.OnboardFormatOK = OtherDevicesProtocol.OnboardFormatSupported(onboard);
+                WriteLog("other device slot " + slot + " onboard format memory=" + onboard[4] + " profile=" + onboard[5] + " macro=" + onboard[6] + " supported=" + s.OnboardFormatOK);
+            }
+            byte[] mode = Call(port, id, slot, 0x8100, 2);
+            if (mode != null) s.OnboardMode = mode[4];
+            if (s.OnboardMode == 1) ReadOnboard(port, s, true, false);
+            FindFeature(port, id, slot, 0x1D4B);   // the reconnect event is recognized through this index
+            if (gate.Interrupted)
+            {
+                WriteLog("other device slot " + slot + " read interrupted: mouse moving");
+                return;
+            }
+            // A request timed out on the way (perhaps it was just switched off): ask once more.
+            if (!OtherDevicesProtocol.ReadConfirmsOnline(timeouts - timeoutsBefore, delegate { return Ping(port, slot); }))
+            {
+                if (gate.Interrupted) return;
+                devices[id] = paired.Copy();
+                MarkNoAnswer(id);
+                return;
+            }
+            backups.AdoptLegacy(s.Wpid, s.UnitId);
+            s.RepairSector = backups.PendingRepair(s.BackupKey);
+            s.LastSeen = DateTime.UtcNow;
+            lastFullRead[id] = DateTime.UtcNow;
+            devices[id] = s;
+            ReadBattery(port, id);
+            OtherDeviceSnapshot d = devices[id];
+            WriteLog("other device slot " + slot + " connected (" + (sent - before) + " requests): " + d.Name + " wpid=" + d.Wpid +
+                " battery=" + d.BatteryPercent + "% " + d.Millivolts + "mV charging=" + d.Charging + " dpi=" + d.Dpi + " rate=" + d.ReportRateMs +
+                "ms onboard=" + d.OnboardMode + " fw=" + d.Firmware + " profile=" + (d.ProfileNumber ?? 0) + "/" + d.Profiles.Count + " stage=" + d.StageIndex);
+            ArmButtonReports(port, id);
+        }
+
+        private static bool AppendData(List<byte> data, byte[] reply)
+        {
+            if (reply == null || reply.Length < 20) return false;
+            for (int i = 4; i < 20; i++) data.Add(reply[i]);
+            return true;
+        }
+
+        // Active profile and stage, plus that profile's stages, buttons and lights when the profile changed.
+        private void ReadOnboard(IOtherPort port, OtherDeviceSnapshot s, bool directory, bool userAction)
+        {
+            if (!s.OnboardFormatOK) return;   // an unknown format is not parsed
+            string id = s.Id;
+            int slot = s.Slot;
+            if (directory)
+            {
+                var data = new List<byte>();
+                foreach (int offset in new[] { 0, 16 })
+                {
+                    byte[] r = Call(port, id, slot, 0x8100, OtherDevicesProtocol.OnboardReadData, OtherDevicesProtocol.ReadDataParameters(0, offset), userAction);
+                    if (!AppendData(data, r)) break;
+                    if (data.Count >= 4 * (s.ProfileCount + 1)) break;
+                }
+                List<int> list = OtherDevicesProtocol.Directory(data.ToArray());
+                if (list.Count > 0)
+                {
+                    s.Profiles = list;
+                    s.ProfileSlots = OtherDevicesProtocol.DirectoryEntries(data.ToArray());
+                }
+            }
+            int before = s.ActiveProfile;
+            byte[] active = Call(port, id, slot, 0x8100, OtherDevicesProtocol.OnboardActiveProfile, null, userAction);
+            int? sector = OtherDevicesProtocol.ResolvedActiveProfile(active, s.Wpid, s.ProfileSlots);
+            if (sector.HasValue) s.ActiveProfile = sector.Value;
+            byte[] stageReply = Call(port, id, slot, 0x8100, OtherDevicesProtocol.OnboardStageIndex, null, userAction);
+            int? stage = OtherDevicesProtocol.StageIndex(stageReply);
+            if (stage.HasValue) s.StageIndex = stage.Value;
+            if (s.ActiveProfile == 0 || (s.ActiveProfile == before && s.DpiStages.Count > 0 && s.Buttons.Count > 0)) return;
+
+            var head = new List<byte>();
+            int end = s.ButtonCount > 0 ? 0x50 : 0x10;
+            for (int offset = 0; offset < end; offset += 16)
+            {
+                byte[] r = Call(port, id, slot, 0x8100, OtherDevicesProtocol.OnboardReadData, OtherDevicesProtocol.ReadDataParameters(s.ActiveProfile, offset), userAction);
+                if (!AppendData(head, r)) break;
+            }
+            byte[] headBytes = head.ToArray();
+            int[] stages = OtherDevicesProtocol.ProfileStages(headBytes);
+            if (stages != null) s.DpiStages = new List<int>(stages);
+            int? defaultStage = OtherDevicesProtocol.DefaultStage(headBytes);
+            if (defaultStage.HasValue) s.DefaultStage = defaultStage.Value;
+            if (headBytes.Length >= 0x50) s.Buttons = OtherDevicesProtocol.ProfileButtons(headBytes, Math.Min(s.ButtonCount, 12));
+            if (s.SectorSize < OtherDevicesProtocol.LightOffset + 2 * OtherDevicesProtocol.LightSize + 2) return;
+            var light = new List<byte>();
+            foreach (int offset in new[] { OtherDevicesProtocol.LightOffset, OtherDevicesProtocol.LightOffset + 16 })
+            {
+                byte[] r = Call(port, id, slot, 0x8100, OtherDevicesProtocol.OnboardReadData, OtherDevicesProtocol.ReadDataParameters(s.ActiveProfile, offset), userAction);
+                if (!AppendData(light, r)) break;
+            }
+            if (light.Count >= 2 * OtherDevicesProtocol.LightSize)
+            {
+                var padded = new byte[OtherDevicesProtocol.LightOffset + light.Count];
+                light.CopyTo(padded, OtherDevicesProtocol.LightOffset);
+                s.Lights = OtherDevicesProtocol.ProfileLights(padded, s.Wpid);
+            }
+        }
+
+        // Profile writes. Reads the whole profile, backs it up, writes, reads back; on a mismatch the old
+        // content is written back. A reload and a return to the previous stage make the change take effect.
+        // Every write carries the profile being edited: if the mouse moved to another one, nothing is written.
+        // The completion runs on the UI thread with null on success, otherwise a message.
+        public void WriteButtons(string id, int sector, Dictionary<int, OtherButtonAssignment> changes, bool restoreOriginal, Action<string> completion)
+        {
+            var request = restoreOriginal ? new WriteRequest { RestoreOriginal = true }
+                : new WriteRequest { Patch = (current, s) => OtherDevicesProtocol.PatchedProfile(current, changes) };
+            WriteProfile(id, sector, request, completion);
+        }
+
+        public void WriteReportRate(string id, int sector, int ms, Action<string> completion)
+        {
+            WriteProfile(id, sector, new WriteRequest { Patch = (current, s) => OtherDevicesProtocol.PatchedReportRate(current, ms) }, completion);
+        }
+
+        public void WriteLights(string id, int sector, Dictionary<int, OtherLightEffect> lights, Action<string> completion)
+        {
+            WriteProfile(id, sector, new WriteRequest { Patch = (current, s) => OtherDevicesProtocol.PatchedLights(current, lights) }, completion);
+        }
+
+        public void WriteStages(string id, int sector, IList<int> stages, int? defaultIndex, Action<string> completion)
+        {
+            WriteProfile(id, sector, new WriteRequest
+            {
+                Patch = (current, s) => OtherDevicesProtocol.PatchedStages(current, stages, defaultIndex, s.DpiMin > 0 ? s.DpiMin : 100, s.DpiMax > 0 ? s.DpiMax : 25600)
+            }, completion);
+        }
+
+        // Writes the last content known to be good back to a profile whose write did not finish.
+        public void RepairProfile(string id, Action<string> completion)
+        {
+            Post(delegate
+            {
+                OtherDeviceSnapshot d;
+                if (!devices.TryGetValue(id, out d) || !d.RepairSector.HasValue)
+                {
+                    Complete(completion, null);
+                    return;
+                }
+                string result = PerformWrite(id, d.RepairSector.Value, new WriteRequest { Repair = true });
+                Publish();
+                Complete(completion, result);
+            });
+        }
+
+        private void WriteProfile(string id, int sector, WriteRequest request, Action<string> completion)
+        {
+            Post(delegate
+            {
+                string result = PerformWrite(id, sector, request);
+                Publish();
+                Complete(completion, result);
+            });
+        }
+
+        private void Complete(Action<string> completion, string result)
+        {
+            if (completion != null) postToUi(delegate { completion(result); });
+        }
+
+        private string PerformWrite(string id, int sector, WriteRequest request)
+        {
+            bool isRepair = request.Repair;
+            OtherDeviceSnapshot found;
+            IOtherPort port = null;
+            bool allowed = devices.TryGetValue(id, out found);
+            if (allowed)
+            {
+                allowed = isRepair
+                    ? found.Link == OtherDeviceLink.Online && found.OnboardMode == 1 && sector >= 1 && sector < 0x100 && found.SectorSize >= 0x50
+                    : found.CanEditButtons;
+                port = PortFor(found.Receiver);
+            }
+            if (!allowed || port == null) return Lang.T("裝置沒有連著，或目前的設定檔不能改", "The device isn't connected or this profile can't be changed");
+            OtherDeviceSnapshot s = found.Copy();
+            if (!isRepair && s.ActiveProfile != sector) return Message(OtherWriteResult.ProfileChanged);
+            gate.Begin();
+            string device = s.BackupKey;
+            OtherDeviceSnapshot snapshot = s.Copy();
+            int slot = s.Slot, stage = s.StageIndex;
+            OtherWriteMode mode;
+            if (request.RestoreOriginal) mode = OtherWriteMode.Restore(backups.LoadImage(backups.OriginalPath(device, sector), s.SectorSize));
+            else if (isRepair) mode = OtherWriteMode.Repair(backups.LoadImage(backups.RepairPath(device, sector), s.SectorSize));
+            else mode = OtherWriteMode.Patched(current => request.Patch(current, snapshot));
+            var io = new OtherProfileIO
+            {
+                ActiveSector = () => OtherDevicesProtocol.ResolvedActiveProfile(Call(port, id, slot, 0x8100, OtherDevicesProtocol.OnboardActiveProfile, null, true), snapshot.Wpid, snapshot.ProfileSlots),
+                Read = which => ReadSector(port, snapshot, which),
+                Command = (function, parameters) => Call(port, id, slot, 0x8100, function, parameters, true) != null,
+                Backup = data => backups.Save(data, device, sector, DateTime.Now),
+                Reload = () =>
+                {
+                    if (Call(port, id, slot, 0x8100, OtherDevicesProtocol.OnboardSetProfile, OtherDevicesProtocol.SetProfileParameters(sector, snapshot.ProfileSlots), true) == null) return false;
+                    return stage < 0 || Call(port, id, slot, 0x8100, OtherDevicesProtocol.OnboardSetStage, new[] { (byte)stage }, true) != null;
+                }
+            };
+            OtherWriteOutcome outcome = OtherProfileWriter.Run(sector, mode, io);
+            WriteLog("other device " + s.Name + " profile " + sector + " write result=" + outcome.Result);
+            if (outcome.Result == OtherWriteResult.FailedNeedsRepair && outcome.RepairImage != null)
+            {
+                bool saved = backups.SaveRepair(outcome.RepairImage, device, sector);
+                WriteLog("other device " + s.Name + " profile " + sector + " repair image saved=" + saved);
+                if (saved) s.RepairSector = sector;
+                devices[id] = s;
+            }
+            if (outcome.Target != null)
+            {
+                byte[] target = outcome.Target;
+                if (isRepair)
+                {
+                    backups.ClearRepair(device, sector);
+                    s.RepairSector = null;
+                }
+                if (s.ActiveProfile == sector)
+                {
+                    s.Buttons = OtherDevicesProtocol.ProfileButtons(target, Math.Min(s.ButtonCount, 12));
+                    int[] stages = OtherDevicesProtocol.ProfileStages(target);
+                    if (stages != null) s.DpiStages = new List<int>(stages);
+                    int? defaultStage = OtherDevicesProtocol.DefaultStage(target);
+                    if (defaultStage.HasValue) s.DefaultStage = defaultStage.Value;
+                    if (s.Lights.Count > 0) s.Lights = OtherDevicesProtocol.ProfileLights(target, s.Lights.Count);
+                    if (Array.IndexOf(OtherDevicesProtocol.ReportRates, (int)target[0]) >= 0) s.ReportRateMs = target[0];
+                }
+                RefreshAfterSwitch(port, s);
+                devices[id] = s;
+            }
+            return Message(outcome.Result);
+        }
+
+        internal static string Message(OtherWriteResult result)
+        {
+            switch (result)
+            {
+                case OtherWriteResult.Written:
+                case OtherWriteResult.Unchanged: return null;
+                case OtherWriteResult.WrittenNotApplied: return Lang.T("已寫入滑鼠，但還沒確認套用。切換一次設定檔就會生效", "Saved to the mouse, but not confirmed as applied. Switch profiles once to apply it");
+                case OtherWriteResult.ProfileChanged: return Lang.T("滑鼠的設定檔已經切換，這次沒有寫入。請重新打開再改", "The mouse switched profiles, so nothing was written. Reopen it and try again");
+                case OtherWriteResult.ReadFailed: return Lang.T("讀取設定檔失敗，沒有寫入", "Couldn't read the profile; nothing was written");
+                case OtherWriteResult.BackupFailed: return Lang.T("無法備份目前的設定檔，沒有寫入", "Couldn't back up the current profile; nothing was written");
+                case OtherWriteResult.UnexpectedContent: return Lang.T("設定檔內容不符預期，沒有寫入", "The profile looks unexpected; nothing was written");
+                case OtherWriteResult.LeftClickLocked: return Lang.T("這個內容會改掉左鍵，沒有寫入", "This would change the left button; nothing was written");
+                case OtherWriteResult.NoBackup: return Lang.T("找不到可用的備份", "No usable backup was found");
+                case OtherWriteResult.FailedUnchanged: return Lang.T("寫入失敗，設定檔沒有改變", "Writing failed; the profile wasn't changed");
+                case OtherWriteResult.FailedRolledBack: return Lang.T("寫入失敗，已改回原本的設定", "Writing failed; the previous settings were restored");
+                default: return Lang.T("寫入沒有完成，設定檔可能不完整。滑鼠連回來後請按「修復設定檔」", "Writing didn't finish and the profile may be incomplete. Once the mouse is back, click Repair profile");
+            }
+        }
+
+        private byte[] ReadSector(IOtherPort port, OtherDeviceSnapshot s, int sector)
+        {
+            if (s.SectorSize < 16) return null;
+            byte[] data = new byte[s.SectorSize];
+            foreach (int offset in OtherDevicesProtocol.ReadOffsets(s.SectorSize))
+            {
+                byte[] r = Call(port, s.Id, s.Slot, 0x8100, OtherDevicesProtocol.OnboardReadData, OtherDevicesProtocol.ReadDataParameters(sector, offset), true);
+                if (r == null || r.Length < 20) return null;
+                Array.Copy(r, 4, data, offset, 16);
+            }
+            return data;
+        }
+
+        // Catches up on anything missed, such as a DPI button pressed while the app was not running.
+        private void ReadSpeed(IOtherPort port, string id)
+        {
+            OtherDeviceSnapshot found;
+            if (!devices.TryGetValue(id, out found)) return;
+            OtherDeviceSnapshot s = found.Copy();
+            byte[] current = Call(port, id, s.Slot, 0x2201, 2, new byte[] { 0 });
+            if (current != null) s.Dpi = OtherDevicesProtocol.CurrentDpi(current);
+            byte[] rate = Call(port, id, s.Slot, 0x8060, 1);
+            if (rate != null) s.ReportRateMs = rate[4];
+            if (s.OnboardMode == 1) ReadOnboard(port, s, false, false);
+            devices[id] = s;
+        }
+
+        // Switches the user asked for: sent right away, the pointer is usually moving while clicking a menu.
+        public void SetStage(string id, int index)
+        {
+            Post(delegate
+            {
+                OtherDeviceSnapshot found;
+                if (!devices.TryGetValue(id, out found) || !found.CanSwitchStage || index < 0 || index >= found.DpiStages.Count || found.DpiStages[index] <= 0) return;
+                IOtherPort port = PortFor(found.Receiver);
+                if (port == null) return;
+                OtherDeviceSnapshot s = found.Copy();
+                gate.Begin();
+                bool ok = Call(port, id, s.Slot, 0x8100, OtherDevicesProtocol.OnboardSetStage, new[] { (byte)index }, true) != null;
+                RefreshAfterSwitch(port, s);
+                devices[id] = s;
+                WriteLog("other device " + s.Name + " set stage " + (index + 1) + " ok=" + ok + ": stage=" + s.StageIndex + " dpi=" + s.Dpi);
+                Publish();
+            });
+        }
+
+        public void SetProfile(string id, int sector)
+        {
+            Post(delegate
+            {
+                OtherDeviceSnapshot found;
+                if (!devices.TryGetValue(id, out found) || found.Link != OtherDeviceLink.Online || found.OnboardMode != 1 || !found.Profiles.Contains(sector)) return;
+                IOtherPort port = PortFor(found.Receiver);
+                if (port == null) return;
+                OtherDeviceSnapshot s = found.Copy();
+                gate.Begin();
+                bool ok = Call(port, id, s.Slot, 0x8100, OtherDevicesProtocol.OnboardSetProfile, OtherDevicesProtocol.SetProfileParameters(sector, s.ProfileSlots), true) != null;
+                RefreshAfterSwitch(port, s);
+                devices[id] = s;
+                WriteLog("other device " + s.Name + " set profile " + sector.ToString("X4") + " ok=" + ok + ": profile=" + (s.ProfileNumber ?? 0) + " stage=" + s.StageIndex + " dpi=" + s.Dpi);
+                Publish();
+            });
+        }
+
+        private void RefreshAfterSwitch(IOtherPort port, OtherDeviceSnapshot s)
+        {
+            string id = s.Id;
+            devices[id] = s.Copy();
+            Thread.Sleep(150);
+            ReadOnboard(port, s, false, true);
+            byte[] current = Call(port, id, s.Slot, 0x2201, 2, new byte[] { 0 }, true);
+            if (current != null) s.Dpi = OtherDevicesProtocol.CurrentDpi(current);
+            s.LastSeen = DateTime.UtcNow;
+        }
+
+        // 0x1004, then 0x1000, then 0x1001 (voltage, converted to a percentage).
+        private bool ReadBattery(IOtherPort port, string id)
+        {
+            OtherDeviceSnapshot found;
+            if (!devices.TryGetValue(id, out found)) return false;
+            OtherDeviceSnapshot s = found.Copy();
+            bool ok = false;
+            OtherBatteryInfo info = OtherDevicesProtocol.UnifiedBatteryInfo(Call(port, id, s.Slot, 0x1004, 1));
+            if (info == null) info = OtherDevicesProtocol.BatteryStatusInfo(Call(port, id, s.Slot, 0x1000, 0));
+            if (info != null)
+            {
+                s.BatterySource = OtherBatterySource.Percent;
+                s.BatteryPercent = info.Percent;
+                ApplyCharge(s, info.State, false, info.Slow);
+                ok = true;
+            }
+            else
+            {
+                byte[] reply = Call(port, id, s.Slot, 0x1001, 0);
+                if (reply != null) ok = ApplyVoltage(s, reply);
+            }
+            if (ok)
+            {
+                lastBattery[id] = DateTime.UtcNow;
+                s.LastSeen = DateTime.UtcNow;
+                s.BatterySeq++;
+            }
+            devices[id] = s;
+            return ok;
+        }
+
+        private bool ApplyVoltage(OtherDeviceSnapshot s, byte[] bytes)
+        {
+            OtherVoltageInfo v = OtherDevicesProtocol.VoltageInfo(bytes);
+            if (v == null) return false;
+            // The voltage jumps when power is connected or removed, so the average starts over.
+            List<int> list;
+            if (v.State != s.ChargeState || !samples.TryGetValue(s.Id, out list)) list = new List<int>();
+            list.Add(v.Millivolts);
+            if (list.Count > 5) list.RemoveRange(0, list.Count - 5);
+            samples[s.Id] = list;
+            s.BatterySource = OtherBatterySource.Voltage;
+            s.Millivolts = v.Millivolts;
+            ApplyCharge(s, v.State, v.Fast, v.Slow);
+            s.BatteryPercent = v.State == OtherChargeState.Full ? 100 : OtherDevicesProtocol.PercentFromMillivolts(OtherDevicesProtocol.Smoothed(list));
+            return true;
+        }
+
+        private static void ApplyCharge(OtherDeviceSnapshot s, OtherChargeState state, bool fast, bool slow)
+        {
+            s.ChargeState = state;
+            s.Charging = state == OtherChargeState.Charging;
+            s.Full = state == OtherChargeState.Full;
+            s.FastCharge = fast;
+            s.SlowCharge = slow;
+        }
+
+        // Reports from the reader threads
+        private void OnReceived(IOtherPort source, byte[] bytes)
+        {
+            if (bytes.Length < 7 || (bytes[0] != 0x10 && bytes[0] != 0x11)) return;
+            lock (pendingLock)
+            {
+                if (pendingKey != null && ReferenceEquals(pendingPort, source))
+                {
+                    byte[] key = pendingKey;
+                    bool reply = bytes.Length > key.Length;
+                    for (int i = 0; reply && i < key.Length; i++) if (bytes[i + 1] != key[i]) reply = false;
+                    // Errors: HID++ 2.0 is <dev> FF <feature> <function>, HID++ 1.0 is <dev> 8F <sub> <register>.
+                    bool error = bytes.Length >= 6 && bytes[1] == key[0] && (bytes[2] == 0xFF || bytes[2] == 0x8F) &&
+                        bytes[3] == key[1] && bytes[4] == key[2];
+                    if (reply || error)
+                    {
+                        pendingReply = reply ? bytes : null;
+                        pendingError = error && !reply;
+                        pendingKey = null;
+                        pendingSignal.Set();
+                        return;
+                    }
+                }
+            }
+            int slot;
+            bool connected;
+            if (OtherDevicesProtocol.ConnectionNotice(bytes, out slot, out connected))
+            {
+                Post(delegate
+                {
+                    if (stopped) return;
+                    WriteLog("other device slot " + slot + " connection notice connected=" + connected);
+                    if (!connected)
+                    {
+                        MarkNoAnswer(source.Key + "#" + slot);
+                        Publish();
+                        return;
+                    }
+                    DeviceCameBack(source, slot);
+                });
+                return;
+            }
+            if (HandleButtonReport(source, bytes)) return;
+            // Software ID 0 means the device sent it on its own: battery change, reconnect (0x1D4B), onboard events.
+            if (bytes[0] != 0x11 || (bytes[3] & 0x0F) != 0 || bytes[1] < 1 || bytes[1] > 6) return;
+            Post(delegate { if (!stopped) HandleEvent(source, bytes); });
+        }
+
+        private static byte IndexOf(Dictionary<int, byte> table, int feature)
+        {
+            byte index;
+            return table.TryGetValue(feature, out index) ? index : (byte)0;
+        }
+
+        private void HandleEvent(IOtherPort source, byte[] bytes)
+        {
+            string id = source.Key + "#" + bytes[1];
+            OtherDeviceSnapshot found;
+            Dictionary<int, byte> table;
+            if (!devices.TryGetValue(id, out found) || !features.TryGetValue(id, out table)) return;
+            OtherDeviceSnapshot s = found.Copy();
+            byte reconnect = IndexOf(table, 0x1D4B);
+            OtherOnboardEvent onboard = OtherDevicesProtocol.OnboardEvent(bytes, IndexOf(table, 0x8100));
+            byte voltage = IndexOf(table, 0x1001), unified = IndexOf(table, 0x1004);
+            if (reconnect != 0 && bytes[2] == reconnect)
+            {
+                WriteLog("other device " + s.Name + " reconnected");
+                DeviceCameBack(source, s.Slot);
+            }
+            else if (onboard != null)
+            {
+                s.LastSeen = DateTime.UtcNow;
+                if (onboard.Kind == OtherOnboardEventKind.StageChanged)
+                {
+                    s.StageIndex = onboard.Stage;
+                    int? dpi = OtherDevicesProtocol.DpiForStage(onboard.Stage, s.DpiStages);
+                    if (dpi.HasValue) s.Dpi = dpi.Value;
+                    devices[id] = s;
+                    WriteLog("other device " + s.Name + " stage changed to " + (onboard.Stage + 1) + " (" + s.Dpi + " DPI)");
+                }
+                else
+                {
+                    devices[id] = s;
+                    WriteLog("other device " + s.Name + " profile changed");
+                    WhenIdle(60, true, null, delegate { ReloadChangedProfile(id); });
+                }
+                Publish();
+            }
+            else if (voltage != 0 && bytes[2] == voltage && ApplyVoltage(s, bytes))
+            {
+                s.LastSeen = DateTime.UtcNow;
+                s.BatterySeq++;
+                devices[id] = s;
+                lastBattery[id] = DateTime.UtcNow;
+                Publish();
+            }
+            else if (unified != 0 && bytes[2] == unified)
+            {
+                OtherBatteryInfo info = OtherDevicesProtocol.UnifiedBatteryInfo(bytes);
+                if (info == null) return;
+                s.BatteryPercent = info.Percent;
+                ApplyCharge(s, info.State, false, info.Slow);
+                s.LastSeen = DateTime.UtcNow;
+                s.BatterySeq++;
+                devices[id] = s;
+                Publish();
+            }
+        }
+
+        private void ReloadChangedProfile(string id)
+        {
+            OtherDeviceSnapshot found;
+            if (!devices.TryGetValue(id, out found) || found.Link != OtherDeviceLink.Online) return;
+            IOtherPort port = PortFor(found.Receiver);
+            if (port == null) return;
+            gate.Begin();
+            OtherDeviceSnapshot current = found.Copy();
+            current.DpiStages = new List<int>();
+            current.Buttons = new List<OtherButtonAssignment>();
+            ReadOnboard(port, current, false, false);
+            int? dpi = OtherDevicesProtocol.DpiForStage(current.StageIndex, current.DpiStages);
+            if (dpi.HasValue) current.Dpi = dpi.Value;
+            if (!gate.Interrupted) devices[id] = current;
+            Publish();
+        }
+
+        // Transport
+        private bool Ping(IOtherPort port, int slot)
+        {
+            return Hidpp(port, slot, 0x00, 1, new byte[] { 0, 0, 0x5A }, 1500, false) != null;
+        }
+
+        private byte? FindFeature(IOtherPort port, string id, int slot, int feature)
+        {
+            Dictionary<int, byte> table;
+            byte cached;
+            if (features.TryGetValue(id, out table) && table.TryGetValue(feature, out cached))
+            {
+                if (cached == 0) return null;
+                return cached;
+            }
+            byte[] root = Hidpp(port, slot, 0x00, 0, new[] { (byte)(feature >> 8), (byte)(feature & 0xFF) }, 1200, false);
+            if (root == null) return null;
+            if (!features.TryGetValue(id, out table))
+            {
+                table = new Dictionary<int, byte>();
+                features[id] = table;
+            }
+            table[feature] = root[4];
+            if (root[4] == 0) return null;
+            return root[4];
+        }
+
+        private byte[] Call(IOtherPort port, string id, int slot, int feature, byte function, byte[] parameters = null, bool userAction = false)
+        {
+            byte? index = FindFeature(port, id, slot, feature);
+            if (!index.HasValue) return null;
+            return Hidpp(port, slot, index.Value, function, parameters ?? new byte[0], 1000, userAction);
+        }
+
+        private static double NowSeconds()
+        {
+            return (DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
+        }
+
+        private byte[] Hidpp(IOtherPort port, int slot, byte feature, byte function, byte[] parameters, int timeout, bool userAction)
+        {
+            byte[] packet = new byte[20];
+            packet[0] = 0x11;
+            packet[1] = (byte)slot;
+            packet[2] = feature;
+            byte requestId = requestIds.Take(NowSeconds());
+            packet[3] = (byte)(function << 4 | requestId);
+            Array.Copy(parameters, 0, packet, 4, Math.Min(parameters.Length, 16));
+            OtherRegisterOutcome outcome = Send(port, packet, new[] { packet[1], packet[2], packet[3] }, timeout, userAction);
+            if (outcome.Kind == OtherRegisterKind.Timeout) requestIds.TimedOut(requestId, NowSeconds());
+            if (outcome.Kind != OtherRegisterKind.Reply || outcome.Reply.Length < 16) return null;
+            return outcome.Reply;
+        }
+
+        // HID++ 1.0 receiver register; the receiver answers itself, so it does not wait for the mouse to stop.
+        private OtherRegisterOutcome Register(IOtherPort port, byte[] packet)
+        {
+            return Send(port, packet, new[] { packet[1], packet[2], packet[3], packet[4] }, 1000, true);
+        }
+
+        // Re-checks the mouse before each packet. A batch cut short returns Timeout; callers tell it
+        // apart through gate.Interrupted, so the device is not mistaken for absent.
+        private OtherRegisterOutcome Send(IOtherPort port, byte[] packet, byte[] key, int timeout, bool userAction)
+        {
+            if (!userAction && !gate.Allow(delegate { return MouseIdle(idleNeeded); }, delegate (double s) { Thread.Sleep((int)(s * 1000)); }))
+                return OtherRegisterOutcome.Timeout();
+            sent++;
+            using (var signal = new ManualResetEventSlim(false))
+            {
+                lock (pendingLock)
+                {
+                    pendingPort = port;
+                    pendingKey = key;
+                    pendingReply = null;
+                    pendingError = false;
+                    pendingSignal = signal;
+                }
+                if (port.Write(packet)) signal.Wait(timeout);
+                byte[] reply;
+                bool error;
+                lock (pendingLock)
+                {
+                    reply = pendingReply;
+                    error = pendingError;
+                    pendingPort = null;
+                    pendingKey = null;
+                    pendingReply = null;
+                    pendingError = false;
+                    pendingSignal = null;
+                }
+                if (reply != null) return OtherRegisterOutcome.FromReply(reply);
+                if (error) return OtherRegisterOutcome.Error();
+            }
+            timeouts++;
+            return OtherRegisterOutcome.Timeout();
+        }
+
+        private void WriteLog(string text)
+        {
+            Action<string> handler = Log;
+            if (handler != null) postToUi(delegate { handler("Others " + text); });
+        }
+
+        private void Publish()
+        {
+            var list = new List<OtherDeviceSnapshot>();
+            foreach (OtherDeviceSnapshot d in devices.Values) list.Add(d.Copy());
+            list.Sort((a, b) =>
+            {
+                int order = string.CompareOrdinal(a.Receiver, b.Receiver);
+                return order != 0 ? order : a.Slot.CompareTo(b.Slot);
+            });
+            Action<List<OtherDeviceSnapshot>> handler = Changed;
+            if (handler != null) postToUi(delegate { handler(list); });
+        }
+
+        public void Dispose()
+        {
+            if (disposed) return;
+            disposed = true;
+            if (timer != null) timer.Dispose();
+            using (var done = new ManualResetEventSlim(false))
+            {
+                Post(delegate
+                {
+                    try { StopButtonReports(); }
+                    catch { }
+                    stopped = true;
+                    try { done.Set(); }
+                    catch (ObjectDisposedException) { }
+                });
+                // Lets a profile write in progress finish; closing the ports stops anything still running.
+                done.Wait(3000);
+            }
+            stopped = true;
+            try { queue.CompleteAdding(); }
+            catch (ObjectDisposedException) { }
+            foreach (IOtherPort port in PortList())
+            {
+                try { port.Dispose(); }
+                catch { }
+            }
+            if (thread != null) thread.Join(1000);
+        }
+    }
+    // ---- Other devices I/O end ----
+
+    // ---- Other devices page ----
+    // One card per device on a Lightspeed receiver. Status, DPI, report rate, profile, lighting and the
+    // buttons stored in the mouse. Windows drops mouse buttons above 5, so a "hand to the app" button on a
+    // G502 is picked up through HID++ 0x8110 and its action is kept in the INI.
+    internal sealed class OtherChoice
+    {
+        public string Title;
+        public OtherButtonAssignment Value;
+        public override string ToString() { return Title; }
+    }
+
+    internal static class OtherText
+    {
+        public static List<OtherChoice> Presets()
+        {
+            var list = new List<OtherChoice>();
+            Action<string, OtherButtonAssignment> add = (title, value) => list.Add(new OtherChoice { Title = title, Value = value });
+            add(Lang.T("左鍵", "Left click"), OtherButtonAssignment.Mouse(1));
+            add(Lang.T("右鍵", "Right click"), OtherButtonAssignment.Mouse(2));
+            add(Lang.T("中鍵", "Middle click"), OtherButtonAssignment.Mouse(3));
+            add(Lang.T("上一頁", "Back"), OtherButtonAssignment.Mouse(4));
+            add(Lang.T("下一頁", "Forward"), OtherButtonAssignment.Mouse(5));
+            add(Lang.T("DPI 上", "DPI up"), OtherButtonAssignment.Function(3));
+            add(Lang.T("DPI 下", "DPI down"), OtherButtonAssignment.Function(4));
+            add(Lang.T("循環切換 DPI", "Cycle DPI"), OtherButtonAssignment.Function(5));
+            add(Lang.T("狙擊（按住降速）", "Sniper (hold to slow)"), OtherButtonAssignment.Function(7));
+            add(Lang.T("下一個設定檔", "Next profile"), OtherButtonAssignment.Function(8));
+            add(Lang.T("上一個設定檔", "Previous profile"), OtherButtonAssignment.Function(9));
+            add(Lang.T("顯示電量", "Show battery"), OtherButtonAssignment.Function(0x0C));
+            add(Lang.T("向左捲動", "Scroll left"), OtherButtonAssignment.Function(1));
+            add(Lang.T("向右捲動", "Scroll right"), OtherButtonAssignment.Function(2));
+            add(Lang.T("播放／暫停", "Play / pause"), OtherButtonAssignment.Consumer(0xCD));
+            add(Lang.T("下一首", "Next track"), OtherButtonAssignment.Consumer(0xB5));
+            add(Lang.T("上一首", "Previous track"), OtherButtonAssignment.Consumer(0xB6));
+            add(Lang.T("音量＋", "Volume up"), OtherButtonAssignment.Consumer(0xE9));
+            add(Lang.T("音量－", "Volume down"), OtherButtonAssignment.Consumer(0xEA));
+            add(Lang.T("靜音", "Mute"), OtherButtonAssignment.Consumer(0xE2));
+            add(Lang.T("複製 Ctrl+C", "Copy Ctrl+C"), OtherButtonAssignment.Key(0x01, 0x06));
+            add(Lang.T("貼上 Ctrl+V", "Paste Ctrl+V"), OtherButtonAssignment.Key(0x01, 0x19));
+            add(Lang.T("剪下 Ctrl+X", "Cut Ctrl+X"), OtherButtonAssignment.Key(0x01, 0x1B));
+            add(Lang.T("復原 Ctrl+Z", "Undo Ctrl+Z"), OtherButtonAssignment.Key(0x01, 0x1D));
+            add(Lang.T("切換視窗 Alt+Tab", "Switch windows Alt+Tab"), OtherButtonAssignment.Key(0x04, 0x2B));
+            add(Lang.T("工作檢視 Win+Tab", "Task view Win+Tab"), OtherButtonAssignment.Key(0x08, 0x2B));
+            add(Lang.T("截圖 Win+Shift+S", "Screenshot Win+Shift+S"), OtherButtonAssignment.Key(0x0A, 0x16));
+            add(Lang.T("停用", "Disabled"), OtherButtonAssignment.Disabled());
+            return list;
+        }
+
+        public static string Title(OtherButtonAssignment a, List<OtherChoice> presets)
+        {
+            foreach (OtherChoice choice in presets) if (choice.Value.Equals(a)) return choice.Title;
+            if (a.AppButton.HasValue) return Lang.T("交給 App（不支援）", "App (unsupported)");
+            if (a.Kind == OtherButtonKind.Mouse) return Lang.T("滑鼠第 ", "Mouse button ") + a.Number + Lang.T(" 鍵", "");
+            return Lang.T("其他（", "Other (") + BitConverter.ToString(a.Bytes).Replace("-", " ") + Lang.T("）", ")");
+        }
+
+        public static string ShortName(OtherDeviceSnapshot d)
+        {
+            var words = new List<string>();
+            foreach (string word in d.Name.Split(' '))
+            {
+                string upper = word.ToUpperInvariant();
+                if (word.Length == 0 || upper == "LIGHTSPEED" || upper == "WIRELESS" || upper == "GAMING" || upper == "MOUSE" || upper == "KEYBOARD" || upper == "LOGITECH") continue;
+                words.Add(word);
+            }
+            string text = string.Join(" ", words.ToArray());
+            if (text.Length == 0) text = d.Name.Length == 0 ? Lang.T("其他裝置", "Other") : d.Name;
+            if (text.Length > 12 && text.IndexOf('/') > 0)
+            {
+                // "B330/M330/M331": keep as many of the last names as fit.
+                string[] names = text.Split('/');
+                string joined = names[names.Length - 1];
+                for (int i = names.Length - 2; i >= 0 && names[i].Length + 1 + joined.Length <= 12; i--) joined = names[i] + "/" + joined;
+                return joined;
+            }
+            return text.Length <= 12 ? text : text.Substring(0, 12);
+        }
+
+        public static string Battery(OtherDeviceSnapshot d)
+        {
+            string volts = d.Millivolts > 0 ? (d.Millivolts / 1000.0).ToString("0.00", System.Globalization.CultureInfo.InvariantCulture) + " V" : "";
+            bool voltage = d.BatterySource == OtherBatterySource.Voltage;
+            if (d.Full) return Lang.T("已充飽", "Fully charged");
+            if (d.ChargeState == OtherChargeState.Error) return Lang.T("充電錯誤", "Charging error");
+            if (d.BatteryPercent < 0) return "—";
+            if (d.Charging)
+            {
+                string what = d.FastCharge ? Lang.T("快充中", "Fast charging") : d.SlowCharge ? Lang.T("慢充中", "Slow charging") : Lang.T("充電中", "Charging");
+                return voltage ? what + Lang.T("（", " (") + volts + Lang.T("）", ")") : d.BatteryPercent + "%" + Lang.T("（", " (") + what + Lang.T("）", ")");
+            }
+            if (d.ChargeState == OtherChargeState.PluggedNotCharging)
+            {
+                string plugged = Lang.T("已接電、未充電", "plugged in, not charging");
+                return (voltage ? Lang.T("約 ", "About ") : "") + d.BatteryPercent + "%" + Lang.T("（", " (") + plugged + Lang.T("）", ")");
+            }
+            return voltage ? Lang.T("約 ", "About ") + d.BatteryPercent + "%" + Lang.T("（", " (") + volts + Lang.T("）", ")") : d.BatteryPercent + "%";
+        }
+
+        // Battery tile: the level on the main line, charging state and voltage underneath.
+        public static string BatteryValue(OtherDeviceSnapshot d)
+        {
+            if (d.Full) return "100%";
+            if (d.BatteryPercent < 0) return "—";
+            return (d.BatterySource == OtherBatterySource.Voltage ? Lang.T("約 ", "~") : "") + d.BatteryPercent + "%";
+        }
+
+        public static string BatteryNote(OtherDeviceSnapshot d)
+        {
+            var parts = new List<string>();
+            if (d.Full) parts.Add(Lang.T("已充飽", "Full"));
+            else if (d.ChargeState == OtherChargeState.Error) parts.Add(Lang.T("充電錯誤", "Charge error"));
+            else if (d.Charging) parts.Add(d.FastCharge ? Lang.T("快充中", "Fast charging") : d.SlowCharge ? Lang.T("慢充中", "Slow charging") : Lang.T("充電中", "Charging"));
+            else if (d.ChargeState == OtherChargeState.PluggedNotCharging) parts.Add(Lang.T("已接電", "Plugged in"));
+            if (d.Millivolts > 0) parts.Add((d.Millivolts / 1000.0).ToString("0.00", System.Globalization.CultureInfo.InvariantCulture) + " V");
+            return string.Join(" · ", parts.ToArray());
+        }
+
+        public static string Link(OtherDeviceSnapshot d)
+        {
+            switch (d.Link)
+            {
+                case OtherDeviceLink.Online: return Lang.T("已連線", "Connected");
+                case OtherDeviceLink.Reading: return Lang.T("讀取中…", "Reading…");
+                case OtherDeviceLink.NoAnswer: return Lang.T("沒有回應", "Not responding");
+                default: return Lang.T("接收器未連接", "Receiver unplugged");
+            }
+        }
+
+        public static string Offline(OtherDeviceSnapshot d)
+        {
+            if (d.Link == OtherDeviceLink.ReceiverGone)
+                return Lang.T("接收器已拔掉。插回這台電腦後會自動重新讀取。", "The receiver was unplugged. Plug it back in and the device is read again automatically.");
+            if (d.Link == OtherDeviceLink.Reading)
+                return Lang.T("正在讀取裝置資料，滑鼠停一下就會完成。", "Reading the device; this finishes as soon as the pointer pauses.");
+            return Lang.T("裝置配對在接收器上但沒有回應，可能在睡眠中或已關機。動一下或打開電源，幾秒內會自動更新。",
+                "The device is paired with the receiver but not responding; it may be asleep or off. Move it or turn it on; this updates within a few seconds.");
+        }
+
+        public static string Seen(OtherDeviceSnapshot d)
+        {
+            if (!d.LastSeen.HasValue) return "";
+            int minutes = (int)((DateTime.UtcNow - d.LastSeen.Value).TotalMinutes);
+            if (minutes < 1) return Lang.T(" · 剛剛更新", " · updated just now");
+            if (minutes < 60) return Lang.T(" · " + minutes + " 分鐘前更新", " · updated " + minutes + " min ago");
+            if (minutes < 1440) return Lang.T(" · " + minutes / 60 + " 小時前更新", " · updated " + minutes / 60 + " h ago");
+            string when = d.LastSeen.Value.ToLocalTime().ToString("M/d HH:mm");
+            return Lang.T(" · " + when + " 更新", " · updated " + when);
+        }
+
+        public static string Light(OtherLightEffect e)
+        {
+            switch (e.Kind)
+            {
+                case OtherLightKind.Off: return Lang.T("關閉", "Off");
+                case OtherLightKind.Fixed: return Lang.T("固定顏色", "Fixed color");
+                case OtherLightKind.Cycle: return Lang.T("色彩循環", "Color cycle");
+                case OtherLightKind.Breathe: return Lang.T("呼吸", "Breathing");
+                default: return Lang.T("其他效果", "Other effect");
+            }
+        }
+
+        public static string ReceiverKind(string pid)
+        {
+            switch (pid)
+            {
+                case "C52B":
+                case "C532": return "Unifying";
+                case "C52F": return "Nano";
+                default: return "Lightspeed";
+            }
+        }
+
+        public static string Subtitle(OtherDeviceSnapshot d)
+        {
+            var parts = new List<string>();
+            string receiver = ReceiverKind(d.ReceiverPid);
+            parts.Add(Lang.T(receiver + " 接收器（" + d.ReceiverPid + "）", receiver + " receiver (" + d.ReceiverPid + ")"));
+            parts.Add(Lang.T("槽位 ", "slot ") + d.Slot);
+            if (d.OnboardMode == 2) parts.Add(Lang.T("主機控制", "Host mode"));
+            if (d.Firmware.Length > 0) parts.Add(Lang.T("韌體 ", "firmware ") + d.Firmware);
+            return string.Join(" · ", parts.ToArray()) + Seen(d);
+        }
+    }
+
+    internal sealed class OtherStageDialog : Form
+    {
+        private readonly NumericUpDown[] values = new NumericUpDown[5];
+        private readonly RadioButton[] defaults = new RadioButton[5];
+        private readonly Label problem = new Label();
+        private readonly OtherDeviceSnapshot device;
+        private readonly int low, high;
+        public readonly List<int> Stages = new List<int>();
+        public int DefaultIndex;
+
+        public OtherStageDialog(OtherDeviceSnapshot d)
+        {
+            device = d;
+            low = d.DpiMin > 0 ? d.DpiMin : 100;
+            high = d.DpiMax > 0 ? d.DpiMax : 25600;
+            float scale = Theme.GetScale();
+            Func<int, int> S = v => (int)Math.Round(v * scale);
+            DialogStyle.Apply(this, Lang.T("各段指標速度", "Pointer speed levels"), 340, 346, scale);
+            Controls.Add(new Label { Text = low + "–" + high + Lang.T(" DPI，以 50 為單位；存進滑鼠目前的設定檔（寫入前會備份）", " DPI in steps of 50; saved to the mouse's current profile (backed up first)"), ForeColor = Theme.Muted, Location = new Point(S(16), S(12)), Size = new Size(S(308), S(38)) });
+            Controls.Add(new Label { Text = Lang.T("段", "Level"), ForeColor = Theme.Muted, AutoSize = true, Location = new Point(S(16), S(56)) });
+            Controls.Add(new Label { Text = "DPI", ForeColor = Theme.Muted, AutoSize = true, Location = new Point(S(70), S(56)) });
+            Controls.Add(new Label { Text = Lang.T("開機預設", "Default"), ForeColor = Theme.Muted, AutoSize = true, Location = new Point(S(210), S(56)) });
+            int y = 80;
+            for (int i = 0; i < 5; i++)
+            {
+                int original = i < d.DpiStages.Count ? d.DpiStages[i] : 0;
+                if (original <= 0) continue;
+                Controls.Add(new Label { Text = (i + 1).ToString(), AutoSize = true, Location = new Point(S(20), S(y + 3)) });
+                var number = new NumericUpDown { Minimum = 0, Maximum = 65000, Increment = 50, Value = original, Location = new Point(S(70), S(y)), Size = new Size(S(110), S(26)) };
+                number.ValueChanged += delegate { Validate2(); };
+                number.KeyUp += delegate { Validate2(); };
+                values[i] = number;
+                Controls.Add(number);
+                var radio = new RadioButton { Location = new Point(S(226), S(y + 2)), Size = new Size(S(22), S(22)), Checked = i == Math.Max(d.DefaultStage, 0) };
+                radio.CheckedChanged += delegate { Validate2(); };
+                defaults[i] = radio;
+                Controls.Add(radio);
+                y += 34;
+            }
+            problem.ForeColor = Color.Firebrick;
+            problem.Location = new Point(S(16), S(254));
+            problem.Size = new Size(S(308), S(36));
+            Controls.Add(problem);
+            Button cancel = Theme.CreateButton(Lang.T("取消", "Cancel"), false);
+            cancel.DialogResult = DialogResult.Cancel;
+            cancel.Bounds = new Rectangle(S(118), S(298), S(96), S(32));
+            Controls.Add(cancel);
+            save = Theme.CreateButton(Lang.T("寫入滑鼠", "Save to mouse"), true);
+            save.Bounds = new Rectangle(S(222), S(298), S(102), S(32));
+            save.Click += delegate
+            {
+                if (!Collect()) return;
+                DialogResult = DialogResult.OK;
+                Close();
+            };
+            Controls.Add(save);
+            CancelButton = cancel;
+            Validate2();
+        }
+
+        private readonly Button save;
+
+        private bool Collect()
+        {
+            Stages.Clear();
+            DefaultIndex = -1;
+            bool ok = true;
+            for (int i = 0; i < 5; i++)
+            {
+                int original = i < device.DpiStages.Count ? device.DpiStages[i] : 0;
+                int value = values[i] != null ? (int)values[i].Value : 0;
+                if (!OtherDevicesProtocol.ValidStage(value, original, low, high)) ok = false;
+                Stages.Add(value);
+                if (defaults[i] != null && defaults[i].Checked) DefaultIndex = i;
+            }
+            return ok && DefaultIndex >= 0 && Stages[DefaultIndex] > 0;
+        }
+
+        private void Validate2()
+        {
+            bool ok = Collect();
+            problem.Text = ok ? "" : Lang.T("數值超出範圍或不是 50 的倍數", "A value is out of range or not a multiple of 50");
+            bool same = true;
+            for (int i = 0; i < 5; i++)
+                if (Stages[i] != (i < device.DpiStages.Count ? device.DpiStages[i] : 0)) same = false;
+            save.Enabled = ok && (!same || DefaultIndex != device.DefaultStage);
+        }
+    }
+
+    internal sealed class OtherLightDialog : Form
+    {
+        private readonly List<OtherLightEffect> original;
+        private readonly ComboBox[] kinds;
+        private readonly Button[] colors;
+        private readonly NumericUpDown[] seconds;
+        private readonly NumericUpDown[] brightness;
+        private readonly Button save;
+        public readonly Dictionary<int, OtherLightEffect> Changes = new Dictionary<int, OtherLightEffect>();
+
+        public OtherLightDialog(List<OtherLightEffect> lights)
+        {
+            original = lights;
+            int n = lights.Count;
+            kinds = new ComboBox[n];
+            colors = new Button[n];
+            seconds = new NumericUpDown[n];
+            brightness = new NumericUpDown[n];
+            float scale = Theme.GetScale();
+            Func<int, int> S = v => (int)Math.Round(v * scale);
+            DialogStyle.Apply(this, Lang.T("燈光", "Lighting"), 430, 82 + n * 112, scale);
+            for (int i = 0; i < n; i++)
+            {
+                int y = 14 + i * 112;
+                OtherLightEffect e = lights[i];
+                string zone = i == 0 ? Lang.T("主要區域", "Main zone") : i == 1 ? Lang.T("G 標誌", "G logo") : Lang.T("區域 ", "Zone ") + (i + 1);
+                Controls.Add(new Label { Text = zone, Font = new Font(Theme.UiFont, 9.5F, FontStyle.Bold), AutoSize = true, Location = new Point(S(16), S(y + 4)) });
+                var kind = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(S(130), S(y)), Size = new Size(S(160), S(26)) };
+                kind.Items.AddRange(new object[] { Lang.T("關閉", "Off"), Lang.T("固定顏色", "Fixed color"), Lang.T("色彩循環", "Color cycle"), Lang.T("呼吸", "Breathing") });
+                if (e.Kind == OtherLightKind.Unknown) kind.Items.Add(Lang.T("其他效果", "Other effect"));
+                kind.SelectedIndex = e.Kind == OtherLightKind.Unknown ? 4 : (int)e.Kind;
+                kinds[i] = kind;
+                Controls.Add(kind);
+                Button color = Theme.CreateButton(Lang.T("顏色…", "Color…"), false);
+                color.Bounds = new Rectangle(S(300), S(y), S(112), S(28));
+                color.Tag = e.Kind == OtherLightKind.Fixed || e.Kind == OtherLightKind.Breathe ? Color.FromArgb(e.R, e.G, e.B) : Color.White;
+                color.Click += delegate
+                {
+                    using (var dialog = new ColorDialog { Color = (Color)color.Tag, FullOpen = true })
+                    {
+                        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                        color.Tag = dialog.Color;
+                        Refresh2();
+                    }
+                };
+                colors[i] = color;
+                Controls.Add(color);
+                Controls.Add(new Label { Text = Lang.T("速度（秒）", "Speed (s)"), ForeColor = Theme.Muted, AutoSize = true, Location = new Point(S(16), S(y + 40)) });
+                bool timed = e.Kind == OtherLightKind.Cycle || e.Kind == OtherLightKind.Breathe;
+                seconds[i] = new NumericUpDown { DecimalPlaces = 1, Increment = 0.5M, Minimum = 1, Maximum = 20, Value = timed ? Math.Max(1M, Math.Min(20M, e.Period / 1000M)) : 5M, Location = new Point(S(130), S(y + 36)), Size = new Size(S(90), S(26)) };
+                Controls.Add(seconds[i]);
+                Controls.Add(new Label { Text = Lang.T("亮度（%）", "Brightness (%)"), ForeColor = Theme.Muted, AutoSize = true, Location = new Point(S(232), S(y + 40)) });
+                brightness[i] = new NumericUpDown { Increment = 5, Minimum = 10, Maximum = 100, Value = timed ? Math.Max(10, Math.Min(100, e.Brightness)) : 100, Location = new Point(S(340), S(y + 36)), Size = new Size(S(72), S(26)) };
+                Controls.Add(brightness[i]);
+                kind.SelectedIndexChanged += delegate { Refresh2(); };
+                seconds[i].ValueChanged += delegate { Refresh2(); };
+                brightness[i].ValueChanged += delegate { Refresh2(); };
+                if (i < n - 1) Controls.Add(new Panel { BackColor = Theme.Divider, Bounds = new Rectangle(S(16), S(y + 76), S(396), 1) });
+            }
+            int bottom = 14 + n * 112;
+            Button cancel = Theme.CreateButton(Lang.T("取消", "Cancel"), false);
+            cancel.DialogResult = DialogResult.Cancel;
+            cancel.Bounds = new Rectangle(S(206), S(bottom + 16), S(96), S(32));
+            Controls.Add(cancel);
+            save = Theme.CreateButton(Lang.T("寫入滑鼠", "Save to mouse"), true);
+            save.Bounds = new Rectangle(S(310), S(bottom + 16), S(102), S(32));
+            save.Click += delegate
+            {
+                Refresh2();
+                DialogResult = DialogResult.OK;
+                Close();
+            };
+            Controls.Add(save);
+            CancelButton = cancel;
+            Refresh2();
+        }
+
+        private OtherLightEffect Effect(int zone)
+        {
+            Color c = (Color)colors[zone].Tag;
+            int period = (int)Math.Round(seconds[zone].Value * 1000);
+            int level = (int)brightness[zone].Value;
+            switch (kinds[zone].SelectedIndex)
+            {
+                case 0: return OtherLightEffect.Off();
+                case 1: return OtherLightEffect.Fixed(c.R, c.G, c.B);
+                case 2: return OtherLightEffect.Cycle(period, level);
+                case 3: return OtherLightEffect.Breathe(c.R, c.G, c.B, period, level);
+                default: return original[zone];
+            }
+        }
+
+        private void Refresh2()
+        {
+            Changes.Clear();
+            for (int i = 0; i < original.Count; i++)
+            {
+                int kind = kinds[i].SelectedIndex;
+                colors[i].Enabled = kind == 1 || kind == 3;
+                seconds[i].Enabled = kind == 2 || kind == 3;
+                brightness[i].Enabled = kind == 2 || kind == 3;
+                OtherLightEffect effect = Effect(i);
+                if (!effect.Equals(original[i])) Changes[i] = effect;
+            }
+            if (save != null) save.Enabled = Changes.Count > 0;
+        }
+    }
+
+    // Series drawings embedded by build.ps1 from assets\device-diagrams\windows.
+    internal static class OtherDiagrams
+    {
+        private const string Prefix = "MXMasterWin.diagram.";
+        private static Dictionary<string, string> models;
+        private static readonly Dictionary<string, Image> images = new Dictionary<string, Image>();
+
+        public static Image ForModel(string wpid)
+        {
+            if (models == null) models = LoadModels();
+            string family;
+            if (string.IsNullOrEmpty(wpid) || !models.TryGetValue(wpid, out family)) return null;
+            Image image;
+            if (images.TryGetValue(family, out image)) return image;
+            try
+            {
+                using (Stream stream = System.Reflection.Assembly.GetExecutingAssembly().GetManifestResourceStream(Prefix + family + ".png"))
+                {
+                    if (stream != null)
+                        using (Image source = Image.FromStream(stream))
+                            image = new Bitmap(source);
+                }
+            }
+            catch { image = null; }
+            images[family] = image;
+            return image;
+        }
+
+        private static Dictionary<string, string> LoadModels()
+        {
+            var table = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                using (Stream stream = System.Reflection.Assembly.GetExecutingAssembly().GetManifestResourceStream(Prefix + "models.txt"))
+                {
+                    if (stream == null) return table;
+                    using (var reader = new StreamReader(stream))
+                    {
+                        string line;
+                        while ((line = reader.ReadLine()) != null)
+                        {
+                            string[] parts = line.Split('=');
+                            if (parts.Length == 2) table[parts[0].Trim()] = parts[1].Trim();
+                        }
+                    }
+                }
+            }
+            catch { }
+            return table;
+        }
+    }
+
+    // One device in the tab row above the card.
+    internal sealed class OtherDeviceTab : Button
+    {
+        private readonly float scale = Theme.GetScale();
+        private bool hover, selected, online;
+        private string title = "", detail = "";
+        public string DeviceId = "";
+
+        public OtherDeviceTab()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            FlatStyle = FlatStyle.Flat;
+            Cursor = Cursors.Hand;
+        }
+
+        public void Set(string id, string name, string state, bool isOnline, bool isSelected)
+        {
+            if (DeviceId == id && title == name && detail == state && online == isOnline && selected == isSelected) return;
+            DeviceId = id;
+            title = name;
+            detail = state;
+            online = isOnline;
+            selected = isSelected;
+            Invalidate();
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnEnter(EventArgs e) { Invalidate(); base.OnEnter(e); }
+        protected override void OnLeave(EventArgs e) { Invalidate(); base.OnLeave(e); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.Clear(Parent != null ? Parent.BackColor : Theme.Card);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            Color fill = selected ? Theme.Accent : hover || (Focused && ShowFocusCues) ? Color.FromArgb(238, 244, 255) : Color.FromArgb(247, 249, 252);
+            Color ink = selected ? Color.White : Theme.Text;
+            Color soft = selected ? Color.FromArgb(222, 233, 255) : Theme.Muted;
+            using (GraphicsPath path = Theme.RoundedRectangle(new RectangleF(0.5F, 0.5F, Width - 1F, Height - 1F), 8F * scale))
+            using (var brush = new SolidBrush(fill))
+            using (var border = new Pen(selected ? Theme.Accent : hover ? Theme.Accent : Theme.CardBorder))
+            {
+                g.FillPath(brush, path);
+                g.DrawPath(border, path);
+            }
+            float dot = 7F * scale, x = 9F * scale;
+            using (var mark = new SolidBrush(online ? (selected ? Color.White : Theme.Good) : Color.FromArgb(170, 176, 188)))
+                g.FillEllipse(mark, x, (Height - dot) / 2F, dot, dot);
+            const TextFormatFlags flags = TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding;
+            int textLeft = (int)(21F * scale), right = Width - (int)(8F * scale);
+            using (var small = new Font(Theme.UiFont, 8F))
+            using (var bold = new Font(Theme.UiFont, 9F, FontStyle.Bold))
+            {
+                int detailWidth = TextRenderer.MeasureText(g, detail, small, Size.Empty, flags).Width;
+                TextRenderer.DrawText(g, detail, small, new Rectangle(right - detailWidth, 0, detailWidth, Height), soft, fill, flags | TextFormatFlags.Right);
+                TextRenderer.DrawText(g, title, bold, new Rectangle(textLeft, 0, Math.Max(0, right - detailWidth - textLeft - (int)(4F * scale)), Height), ink, fill,
+                    flags | TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+            }
+        }
+    }
+
+    // A summary tile: caption, main value and a small note. Clickable tiles open a menu or dialog.
+    internal sealed class OtherStatTile : Button
+    {
+        private readonly float scale = Theme.GetScale();
+        private readonly bool clickable;
+        private bool hover;
+        private string main = "", note = "";
+        public string Caption = "";
+
+        public OtherStatTile(bool clickable)
+        {
+            this.clickable = clickable;
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            if (!clickable) SetStyle(ControlStyles.Selectable, false);
+            FlatStyle = FlatStyle.Flat;
+            TabStop = clickable;
+            Cursor = clickable ? Cursors.Hand : Cursors.Default;
+        }
+
+        public void SetText(string mainText, string noteText)
+        {
+            if (main == mainText && note == noteText) return;
+            main = mainText;
+            note = noteText;
+            Invalidate();
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnEnter(EventArgs e) { Invalidate(); base.OnEnter(e); }
+        protected override void OnLeave(EventArgs e) { Invalidate(); base.OnLeave(e); }
+        protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.Clear(Parent != null ? Parent.BackColor : Theme.Card);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            bool active = clickable && Enabled && (hover || (Focused && ShowFocusCues));
+            Color fill = active ? Color.FromArgb(238, 244, 255) : Color.FromArgb(247, 249, 252);
+            using (GraphicsPath path = Theme.RoundedRectangle(new RectangleF(0.5F, 0.5F, Width - 1F, Height - 1F), 8F * scale))
+            using (var brush = new SolidBrush(fill))
+            using (var border = new Pen(active ? Theme.Accent : Theme.CardBorder))
+            {
+                g.FillPath(brush, path);
+                g.DrawPath(border, path);
+            }
+            const TextFormatFlags flags = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine |
+                TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding;
+            int left = (int)(10F * scale), width = Width - (int)(18F * scale);
+            Color ink = Enabled ? Theme.Text : Theme.Muted;
+            using (var small = new Font(Theme.UiFont, 8F))
+                TextRenderer.DrawText(g, Caption, small, new Rectangle(left, (int)(5F * scale), width, (int)(15F * scale)), Theme.Muted, fill, flags);
+            using (var big = new Font(Theme.UiFont, 10.5F, FontStyle.Bold))
+                TextRenderer.DrawText(g, main, big, new Rectangle(left, (int)(20F * scale), width, (int)(21F * scale)), ink, fill, flags);
+            using (var tiny = new Font(Theme.UiFont, 7.5F))
+                TextRenderer.DrawText(g, note, tiny, new Rectangle(left, (int)(41F * scale), width, (int)(14F * scale)), Theme.Muted, fill, flags);
+            if (clickable)
+            {
+                float x = Width - 13F * scale, y = 12F * scale, s = 3.2F * scale;
+                using (var pen = new Pen(Enabled ? Theme.Muted : Theme.CardBorder, 1.3F * scale))
+                    g.DrawLines(pen, new[] { new PointF(x - s, y - s * 0.5F), new PointF(x, y + s * 0.5F), new PointF(x + s, y - s * 0.5F) });
+            }
+        }
+    }
+
+    // Original top-view sketch of a G502 with a numbered marker per button (numbers match the list).
+    internal sealed class OtherMouseDiagram : Control
+    {
+        private const float DesignWidth = 200F, DesignHeight = 256F, BadgeRadius = 9.5F;
+
+        private sealed class Spot
+        {
+            public int Row;
+            public PointF Target, Badge;
+        }
+
+        // Rows follow OtherDevicesProtocol.ButtonName for 407F. Positions follow the numbered
+        // drawing in the G502 LIGHTSPEED setup guide; the artwork itself is drawn here.
+        private static readonly Spot[] Spots =
+        {
+            new Spot { Row = 0, Target = new PointF(80F, 56F), Badge = new PointF(13F, 30F) },
+            new Spot { Row = 7, Target = new PointF(60.5F, 68F), Badge = new PointF(13F, 54F) },
+            new Spot { Row = 10, Target = new PointF(99.5F, 76F), Badge = new PointF(13F, 78F) },
+            new Spot { Row = 6, Target = new PointF(60F, 91F), Badge = new PointF(13F, 102F) },
+            new Spot { Row = 5, Target = new PointF(52F, 103F), Badge = new PointF(13F, 126F) },
+            new Spot { Row = 4, Target = new PointF(57F, 130F), Badge = new PointF(13F, 150F) },
+            new Spot { Row = 3, Target = new PointF(62F, 158F), Badge = new PointF(13F, 174F) },
+            new Spot { Row = 1, Target = new PointF(136F, 62F), Badge = new PointF(187F, 40F) },
+            new Spot { Row = 9, Target = new PointF(117.5F, 76F), Badge = new PointF(187F, 74F) },
+            new Spot { Row = 2, Target = new PointF(108.5F, 92F), Badge = new PointF(187F, 104F) },
+            new Spot { Row = 8, Target = new PointF(110.5F, 130F), Badge = new PointF(187F, 134F) }
+        };
+
+        private int highlight = -1;
+        public event Action<int> HotspotClicked;
+        public event Action<int> HighlightChanged;
+
+        public OtherMouseDiagram()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        }
+
+        public int Highlight
+        {
+            get { return highlight; }
+            set
+            {
+                if (value == highlight) return;
+                highlight = value;
+                Invalidate();
+                Action<int> handler = HighlightChanged;
+                if (handler != null) handler(value);
+            }
+        }
+
+        private float Fit { get { return Math.Min(Width / DesignWidth, Height / DesignHeight); } }
+
+        private Spot SpotAt(Point location)
+        {
+            float fit = Fit;
+            float x = (location.X - (Width - DesignWidth * fit) / 2F) / fit;
+            float y = (location.Y - (Height - DesignHeight * fit) / 2F) / fit;
+            float reach = (BadgeRadius + 2F) * (BadgeRadius + 2F);
+            foreach (Spot spot in Spots)
+            {
+                float dx = x - spot.Badge.X, dy = y - spot.Badge.Y;
+                if (dx * dx + dy * dy <= reach) return spot;
+            }
+            return null;
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            Spot spot = SpotAt(e.Location);
+            Cursor = spot != null ? Cursors.Hand : Cursors.Default;
+            Highlight = spot != null ? spot.Row : -1;
+            base.OnMouseMove(e);
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            Highlight = -1;
+            base.OnMouseLeave(e);
+        }
+
+        protected override void OnMouseClick(MouseEventArgs e)
+        {
+            Spot spot = e.Button == MouseButtons.Left ? SpotAt(e.Location) : null;
+            Action<int> handler = HotspotClicked;
+            if (spot != null && handler != null) handler(spot.Row);
+            base.OnMouseClick(e);
+        }
+
+        private static PointF[] Points(params float[] xy)
+        {
+            var result = new PointF[xy.Length / 2];
+            for (int i = 0; i < result.Length; i++) result[i] = new PointF(xy[i * 2], xy[i * 2 + 1]);
+            return result;
+        }
+
+        private static GraphicsPath Outline()
+        {
+            var p = new GraphicsPath();
+            p.StartFigure();
+            p.AddLine(97F, 30F, 96F, 47F);
+            p.AddLine(96F, 47F, 118F, 47F);
+            p.AddLine(118F, 47F, 115F, 24F);
+            p.AddBezier(115F, 24F, 128F, 32F, 140F, 38F, 146F, 44F);
+            p.AddBezier(146F, 44F, 152F, 52F, 155F, 72F, 158F, 94F);
+            p.AddBezier(158F, 94F, 159F, 112F, 158F, 128F, 159F, 140F);
+            p.AddBezier(159F, 140F, 160F, 155F, 163F, 170F, 163.5F, 184F);
+            p.AddBezier(163.5F, 184F, 164F, 200F, 152F, 224F, 137F, 237F);
+            p.AddBezier(137F, 237F, 130F, 243F, 122F, 246F, 116F, 247.4F);
+            p.AddLine(116F, 247.4F, 108.5F, 245F);
+            p.AddLine(108.5F, 245F, 101.3F, 248.7F);
+            p.AddBezier(101.3F, 248.7F, 92F, 247F, 81F, 241F, 74F, 235F);
+            p.AddLine(74F, 235F, 38.3F, 181.5F);
+            p.AddBezier(38.3F, 181.5F, 35F, 178F, 34F, 176F, 34F, 172F);
+            p.AddBezier(34F, 172F, 33F, 158F, 34F, 146F, 36.2F, 136F);
+            p.AddBezier(36.2F, 136F, 38F, 130F, 44F, 126F, 48.8F, 121.4F);
+            p.AddLine(48.8F, 121.4F, 50.5F, 111F);
+            p.AddLine(50.5F, 111F, 47.8F, 104F);
+            p.AddLine(47.8F, 104F, 50.9F, 88F);
+            p.AddLine(50.9F, 88F, 65.6F, 48F);
+            p.AddLine(65.6F, 48F, 97F, 30F);
+            p.CloseFigure();
+            return p;
+        }
+
+        // A main button: soft gradient, tinted while its row is highlighted.
+        private void MainPlate(Graphics g, PointF[] points, int row)
+        {
+            using (var fill = new LinearGradientBrush(new RectangleF(45F, 20F, 115F, 125F),
+                Color.FromArgb(92, 97, 108), Color.FromArgb(58, 62, 71), 80F))
+                g.FillPolygon(fill, points);
+            if (row == highlight)
+                using (var tint = new SolidBrush(Color.FromArgb(165, Theme.Accent)))
+                    g.FillPolygon(tint, points);
+            using (var edge = new Pen(Color.FromArgb(24, 26, 32), 0.9F) { LineJoin = LineJoin.Round })
+                g.DrawPolygon(edge, points);
+        }
+
+        private void SidePlate(Graphics g, PointF[] points, int row)
+        {
+            using (var fill = new SolidBrush(row == highlight ? Theme.Accent : Color.FromArgb(120, 126, 138)))
+                g.FillPolygon(fill, points);
+            using (var edge = new Pen(Color.FromArgb(24, 26, 32), 0.7F) { LineJoin = LineJoin.Round })
+                g.DrawPolygon(edge, points);
+        }
+
+        private void Key(Graphics g, RectangleF r, float radius, int row, Color normal)
+        {
+            using (GraphicsPath path = Theme.RoundedRectangle(r, radius))
+            using (var brush = new SolidBrush(row >= 0 && row == highlight ? Theme.Accent : normal))
+            using (var edge = new Pen(Color.FromArgb(138, 145, 158), 0.7F))
+            {
+                g.FillPath(brush, path);
+                g.DrawPath(edge, path);
+            }
+        }
+
+        private void Arrow(Graphics g, PointF[] points, int row)
+        {
+            using (var brush = new SolidBrush(row == highlight ? Theme.Accent : Color.FromArgb(176, 182, 194)))
+                g.FillPolygon(brush, points);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.Clear(Parent != null ? Parent.BackColor : Theme.Card);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+            float fit = Fit;
+            g.TranslateTransform((Width - DesignWidth * fit) / 2F, (Height - DesignHeight * fit) / 2F);
+            g.ScaleTransform(fit, fit);
+
+            using (GraphicsPath body = Outline())
+            {
+                using (var shadowPath = (GraphicsPath)body.Clone())
+                using (var shadow = new SolidBrush(Color.FromArgb(38, 20, 26, 38)))
+                using (var move = new Matrix())
+                {
+                    move.Translate(1F, 3.5F);
+                    shadowPath.Transform(move);
+                    g.FillPath(shadow, shadowPath);
+                }
+                using (var fill = new LinearGradientBrush(new RectangleF(30F, 20F, 136F, 232F),
+                    Color.FromArgb(64, 68, 78), Color.FromArgb(36, 38, 45), 72F))
+                    g.FillPath(fill, body);
+
+                // Palm: a lighter panel on the thumb side, split by a curved seam.
+                GraphicsState state = g.Save();
+                g.SetClip(body, CombineMode.Intersect);
+                using (var palm = new GraphicsPath())
+                {
+                    palm.AddBezier(61F, 178F, 72F, 196F, 92F, 200F, 106F, 207F);
+                    palm.AddBezier(106F, 207F, 108F, 222F, 105F, 238F, 102F, 250F);
+                    palm.AddLine(102F, 250F, 60F, 250F);
+                    palm.AddLine(60F, 250F, 28F, 180F);
+                    palm.CloseFigure();
+                    using (var light = new SolidBrush(Color.FromArgb(20, 255, 255, 255)))
+                        g.FillPath(light, palm);
+                }
+                g.Restore(state);
+                using (var seam = new Pen(Color.FromArgb(22, 24, 30), 1F))
+                {
+                    g.DrawBezier(seam, 61F, 178F, 72F, 196F, 92F, 200F, 106F, 207F);
+                    g.DrawBezier(seam, 106F, 207F, 108F, 222F, 105F, 238F, 102F, 248F);
+                    g.DrawBezier(seam, 150F, 141F, 148F, 154F, 148F, 168F, 158F, 186F);
+                }
+
+                // Main buttons and the channel between them.
+                MainPlate(g, Points(97F, 31F, 96.6F, 47.5F, 101.3F, 137F, 72F, 150F, 65.8F, 86F, 66.3F, 50.5F), 0);
+                MainPlate(g, Points(115.5F, 26F, 118.3F, 47.5F, 119.6F, 140F, 149.6F, 139.5F, 155.5F, 95F, 151F, 62F, 144.5F, 46F), 1);
+                using (var channel = new SolidBrush(Color.FromArgb(27, 29, 35)))
+                    g.FillPolygon(channel, Points(96.8F, 47.5F, 118F, 47.5F, 119.4F, 140F, 101.5F, 137.5F));
+
+                // Side buttons along the left edge, front to back: G8, G7, sniper, forward, back.
+                SidePlate(g, Points(65.4F, 50F, 65.4F, 85F, 52.5F, 87F), 7);
+                SidePlate(g, Points(52F, 89F, 65.6F, 87F, 67F, 94F, 54F, 97F), 6);
+                SidePlate(g, Points(49.2F, 99F, 54F, 98.4F, 55F, 108F, 51F, 110F), 5);
+                SidePlate(g, Points(51.6F, 112F, 57F, 111.5F, 63.5F, 146F, 56.5F, 147F), 4);
+                SidePlate(g, Points(57F, 149.5F, 64F, 148.5F, 67F, 165F, 61F, 167.5F), 3);
+
+                using (var edge = new Pen(Color.FromArgb(112, 118, 130), 1F) { LineJoin = LineJoin.Round })
+                    g.DrawPath(edge, body);
+            }
+
+            // Wheel, tilt directions, the fixed wheel-mode key and G9 behind it.
+            using (GraphicsPath slot = Theme.RoundedRectangle(new RectangleF(101.5F, 61F, 14F, 43F), 5F))
+            using (var dark = new SolidBrush(Color.FromArgb(14, 15, 19)))
+                g.FillPath(dark, slot);
+            Key(g, new RectangleF(103F, 63.5F, 11F, 38F), 4.5F, 2, Color.FromArgb(166, 172, 182));
+            using (var ticks = new Pen(Color.FromArgb(highlight == 2 ? 160 : 120, 34, 37, 44), 0.9F))
+                for (float y = 67F; y < 99F; y += 3.6F) g.DrawLine(ticks, 104.5F, y, 112.5F, y);
+            Arrow(g, Points(100.8F, 71.5F, 100.8F, 80.5F, 98F, 76F), 10);
+            Arrow(g, Points(116.2F, 71.5F, 116.2F, 80.5F, 118.8F, 76F), 9);
+            Key(g, new RectangleF(103.6F, 107F, 13F, 11F), 2.5F, -1, Color.FromArgb(48, 51, 59));
+            Key(g, new RectangleF(104F, 122.5F, 13F, 14.5F), 2.5F, 8, Color.FromArgb(92, 97, 108));
+
+            using (var numberFont = new Font(Theme.UiFont, 10F, FontStyle.Bold, GraphicsUnit.Pixel))
+            using (var center = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+            {
+                foreach (Spot spot in Spots)
+                {
+                    bool on = spot.Row == highlight;
+                    using (var line = new Pen(on ? Theme.Accent : Color.FromArgb(150, Theme.Accent), on ? 1.4F : 0.8F))
+                        g.DrawLine(line, spot.Badge, spot.Target);
+                    using (var dot = new SolidBrush(on ? Theme.Accent : Color.FromArgb(120, 175, 255)))
+                        g.FillEllipse(dot, spot.Target.X - 1.7F, spot.Target.Y - 1.7F, 3.4F, 3.4F);
+                    var circle = new RectangleF(spot.Badge.X - BadgeRadius, spot.Badge.Y - BadgeRadius, BadgeRadius * 2F, BadgeRadius * 2F);
+                    using (var face = new SolidBrush(on ? Theme.Accent : Color.White))
+                    using (var ring = new Pen(Theme.Accent, 1.2F))
+                    using (var ink = new SolidBrush(on ? Color.White : Theme.Accent))
+                    {
+                        g.FillEllipse(face, circle);
+                        g.DrawEllipse(ring, circle);
+                        g.DrawString((spot.Row + 1).ToString(), numberFont, ink, circle, center);
+                    }
+                }
+            }
+        }
+    }
+
+    internal sealed class OtherDeviceCard : Panel
+    {
+        private const int Width0 = 716;
+        private readonly OtherDevicesManager manager;
+        private readonly Func<int, int> S;
+        private readonly Label name = new Label(), subtitle = new Label(), status = new Label(), offline = new Label();
+        private readonly Label repairText = new Label(), buttonsHint = new Label(), message = new Label(), appWarning = new Label();
+        private readonly Button repair, restore;
+        private readonly OtherStatTile batteryTile, dpiButton, rateButton, profileButton, lightButton;
+        private readonly OtherMouseDiagram diagram = new OtherMouseDiagram();
+        private readonly PictureBox familyPicture = new PictureBox { SizeMode = PictureBoxSizeMode.Zoom, Visible = false };
+        private readonly Label pictureNote = new Label { Visible = false, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleCenter };
+        private readonly Label basicHint = new Label { Visible = false, UseMnemonic = false };
+        private readonly Panel chips = new Panel(), rule1 = new Panel();
+        private readonly Label buttonsTitle = new Label();
+        private readonly Label[] rowNames = new Label[12];
+        private readonly ComboBox[] rowCombos = new ComboBox[12];
+        private readonly List<OtherChoice> presets = OtherText.Presets();
+        private OtherDeviceSnapshot device;
+        private bool busy;
+        private bool updating;
+        private bool lastHasBackup;
+        private readonly Func<string, int, ActionBinding> getApp;
+        private readonly Action<string, int, ActionBinding> setApp;
+        private readonly ActionPicker[] rowPickers = new ActionPicker[12];
+        private readonly string[] pickerText = new string[12];
+
+        public OtherDeviceCard(OtherDevicesManager manager, Func<int, int> scale,
+            Func<string, int, ActionBinding> getApp, Action<string, int, ActionBinding> setApp)
+        {
+            this.manager = manager;
+            this.getApp = getApp;
+            this.setApp = setApp;
+            S = scale;
+            BackColor = Theme.Card;
+            Width = S(Width0);
+            name.AutoEllipsis = true;
+            name.UseMnemonic = false;
+            name.Font = new Font(Theme.UiFont, 11F, FontStyle.Bold);
+            name.Bounds = new Rectangle(S(4), 0, S(520), S(24));
+            subtitle.AutoEllipsis = true;
+            subtitle.UseMnemonic = false;
+            subtitle.ForeColor = Theme.Muted;
+            subtitle.Font = new Font(Theme.UiFont, 8.5F);
+            subtitle.Bounds = new Rectangle(S(4), S(25), S(Width0 - 8), S(18));
+            status.TextAlign = ContentAlignment.MiddleRight;
+            status.Font = new Font(Theme.UiFont, 9F, FontStyle.Bold);
+            status.Bounds = new Rectangle(S(Width0 - 180), 0, S(176), S(24));
+            Controls.AddRange(new Control[] { name, subtitle, status });
+
+            offline.ForeColor = Theme.Muted;
+            offline.UseMnemonic = false;
+            offline.Bounds = new Rectangle(S(4), S(52), S(Width0 - 12), S(62));
+            Controls.Add(offline);
+
+            repairText.ForeColor = Theme.Warning;
+            repairText.AutoEllipsis = true;
+            repairText.UseMnemonic = false;
+            repairText.TextAlign = ContentAlignment.MiddleLeft;
+            repairText.Bounds = new Rectangle(S(4), S(50), S(Width0 - 150), S(30));
+            Controls.Add(repairText);
+            repair = Theme.CreateButton(Lang.T("修復設定檔", "Repair profile"), true);
+            repair.Bounds = new Rectangle(S(Width0 - 134), S(50), S(130), S(30));
+            repair.Click += delegate
+            {
+                if (device != null) Run(c => manager.RepairProfile(device.Id, c));
+            };
+            Controls.Add(repair);
+
+            chips.BackColor = Theme.Card;
+            batteryTile = Tile(Lang.T("電量", "Battery"), null);
+            dpiButton = Tile(Lang.T("指標速度", "Pointer speed"), delegate { ShowDpiMenu(); });
+            rateButton = Tile(Lang.T("回報率", "Report rate"), delegate { ShowRateMenu(); });
+            profileButton = Tile(Lang.T("設定檔", "Profile"), delegate { ShowProfileMenu(); });
+            lightButton = Tile(Lang.T("燈光", "Lighting"), delegate { EditLights(); });
+            Controls.Add(chips);
+            rule1.BackColor = Theme.Divider;
+            Controls.Add(rule1);
+
+            diagram.HighlightChanged += row =>
+            {
+                for (int i = 0; i < rowNames.Length; i++) rowNames[i].ForeColor = i == row ? Theme.Accent : Theme.Text;
+            };
+            diagram.HotspotClicked += row =>
+            {
+                if (row >= rowCombos.Length) return;
+                ComboBox target = rowPickers[row] != null && rowPickers[row].Combo.Visible ? rowPickers[row].Combo : rowCombos[row];
+                if (!target.Visible || !target.Enabled) return;
+                target.Focus();
+                target.DroppedDown = true;
+            };
+            Controls.Add(diagram);
+            familyPicture.BackColor = Theme.Card;
+            Controls.Add(familyPicture);
+            pictureNote.ForeColor = Theme.Muted;
+            pictureNote.Font = new Font(Theme.UiFont, 7.5F);
+            pictureNote.Text = Lang.T("示意圖，尚未對應右側清單", "Illustration; not linked to the list");
+            Controls.Add(pictureNote);
+            basicHint.ForeColor = Theme.Muted;
+            basicHint.Text = Lang.T("這個裝置沒有內建設定檔，目前可以查看電量和連線狀態。", "This device has no onboard profiles. Its battery and connection status are shown here.");
+            Controls.Add(basicHint);
+
+            buttonsTitle.Text = Lang.T("按鍵", "Buttons");
+            buttonsTitle.Font = new Font(Theme.UiFont, 9.5F, FontStyle.Bold);
+            buttonsTitle.AutoSize = true;
+            Controls.Add(buttonsTitle);
+            buttonsHint.ForeColor = Theme.Muted;
+            buttonsHint.AutoEllipsis = true;
+            buttonsHint.UseMnemonic = false;
+            buttonsHint.Font = new Font(Theme.UiFont, 8.5F);
+            Controls.Add(buttonsHint);
+            for (int i = 0; i < rowCombos.Length; i++)
+            {
+                int index = i;
+                rowNames[i] = new Label { AutoEllipsis = true, UseMnemonic = false, TextAlign = ContentAlignment.MiddleLeft, Font = new Font(Theme.UiFont, 9F), Visible = false };
+                var combo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Font = new Font(Theme.UiFont, 9F), Visible = false, DropDownWidth = S(270), MaxDropDownItems = 18 };
+                combo.SelectionChangeCommitted += delegate { ButtonPicked(index); };
+                combo.MouseEnter += delegate { diagram.Highlight = index; };
+                combo.MouseLeave += delegate { diagram.Highlight = -1; };
+                rowNames[i].MouseEnter += delegate { diagram.Highlight = index; };
+                rowNames[i].MouseLeave += delegate { diagram.Highlight = -1; };
+                rowCombos[i] = combo;
+                Controls.Add(rowNames[i]);
+                Controls.Add(combo);
+            }
+            message.ForeColor = Theme.Muted;
+            message.AutoEllipsis = true;
+            message.UseMnemonic = false;
+            message.TextAlign = ContentAlignment.MiddleLeft;
+            message.Font = new Font(Theme.UiFont, 8.5F);
+            Controls.Add(message);
+            restore = Theme.CreateButton(Lang.T("還原原本的設定檔", "Restore original profile"), false);
+            restore.Click += delegate
+            {
+                if (device == null) return;
+                string sectorName = device.ProfileNumber.HasValue ? device.ProfileNumber.Value.ToString() : device.ActiveProfile.ToString();
+                if (MessageBox.Show(this, Lang.T("把設定檔 " + sectorName + " 改回第一次修改前的內容？按鍵、DPI、回報率與燈光都會還原。", "Put profile " + sectorName + " back to how it was before the first change? Buttons, DPI, report rate and lighting are all restored."),
+                    "MX Master Win", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
+                int sector = device.ActiveProfile;
+                string id = device.Id;
+                Run(c => manager.WriteButtons(id, sector, new Dictionary<int, OtherButtonAssignment>(), true, c));
+            };
+            Controls.Add(restore);
+            appWarning.ForeColor = Theme.Warning;
+            appWarning.AutoEllipsis = true;
+            appWarning.UseMnemonic = false;
+            appWarning.TextAlign = ContentAlignment.MiddleLeft;
+            appWarning.Font = new Font(Theme.UiFont, 8.5F);
+            Controls.Add(appWarning);
+        }
+
+        private OtherStatTile Tile(string caption, EventHandler click)
+        {
+            var tile = new OtherStatTile(click != null) { Caption = caption };
+            if (click != null) tile.Click += click;
+            chips.Controls.Add(tile);
+            return tile;
+        }
+
+        // The write result takes the place of the hint next to the "Buttons" title.
+        private void ShowMessage(string text)
+        {
+            message.Text = text;
+            bool hasButtons = device != null && device.Link == OtherDeviceLink.Online && device.Buttons.Count > 0;
+            message.Visible = hasButtons && text.Length > 0;
+            buttonsHint.Visible = hasButtons && text.Length == 0;
+        }
+
+        private void Run(Action<Action<string>> start)
+        {
+            busy = true;
+            ShowMessage(Lang.T("正在寫入滑鼠…", "Saving to the mouse…"));
+            ApplyEnabled();
+            start(result =>
+            {
+                busy = false;
+                ShowMessage(result ?? Lang.T("已寫入滑鼠", "Saved to the mouse"));
+                ApplyEnabled();
+                if (device != null) UpdateButtons();
+            });
+        }
+
+        private void ApplyEnabled()
+        {
+            bool editable = device != null && device.CanEditButtons && !busy;
+            bool online = device != null && device.Link == OtherDeviceLink.Online && !busy;
+            dpiButton.Enabled = online && device.CanSwitchStage;
+            rateButton.Enabled = editable;
+            profileButton.Enabled = online && device.OnboardMode == 1 && device.Profiles.Count > 1;
+            lightButton.Enabled = editable && device.Lights.Count > 0;
+            repair.Enabled = online;
+            restore.Enabled = editable;
+            for (int i = 1; i < rowCombos.Length; i++) rowCombos[i].Enabled = editable;
+        }
+
+        private void ShowDpiMenu()
+        {
+            if (device == null) return;
+            OtherDeviceSnapshot d = device;
+            var menu = new ContextMenuStrip();
+            for (int i = 0; i < d.DpiStages.Count; i++)
+            {
+                if (d.DpiStages[i] <= 0) continue;
+                int index = i;
+                var item = new ToolStripMenuItem(d.DpiStages[i] + " DPI") { Checked = d.StageIndex == i };
+                item.Click += delegate { manager.SetStage(d.Id, index); };
+                menu.Items.Add(item);
+            }
+            if (d.CanEditButtons)
+            {
+                menu.Items.Add(new ToolStripSeparator());
+                menu.Items.Add(Lang.T("編輯各段…", "Edit levels…"), null, delegate { EditStages(); });
+            }
+            menu.Show(dpiButton, new Point(0, dpiButton.Height));
+        }
+
+        private void EditStages()
+        {
+            if (device == null) return;
+            OtherDeviceSnapshot d = device;
+            using (var dialog = new OtherStageDialog(d))
+            {
+                if (dialog.ShowDialog(FindForm()) != DialogResult.OK) return;
+                var stages = new List<int>(dialog.Stages);
+                int defaultIndex = dialog.DefaultIndex;
+                Run(c => manager.WriteStages(d.Id, d.ActiveProfile, stages, defaultIndex, c));
+            }
+        }
+
+        private void ShowRateMenu()
+        {
+            if (device == null) return;
+            OtherDeviceSnapshot d = device;
+            var menu = new ContextMenuStrip();
+            foreach (int rate in OtherDevicesProtocol.ReportRates)
+            {
+                int ms = rate;
+                var item = new ToolStripMenuItem(OtherDevicesProtocol.ReportRateHz(ms) + " Hz") { Checked = d.ReportRateMs == ms };
+                item.Click += delegate { Run(c => manager.WriteReportRate(d.Id, d.ActiveProfile, ms, c)); };
+                menu.Items.Add(item);
+            }
+            menu.Show(rateButton, new Point(0, rateButton.Height));
+        }
+
+        private void ShowProfileMenu()
+        {
+            if (device == null) return;
+            OtherDeviceSnapshot d = device;
+            var menu = new ContextMenuStrip();
+            for (int i = 0; i < d.Profiles.Count; i++)
+            {
+                int sector = d.Profiles[i];
+                var item = new ToolStripMenuItem(Lang.T("設定檔 ", "Profile ") + (i + 1)) { Checked = d.ActiveProfile == sector };
+                item.Click += delegate { manager.SetProfile(d.Id, sector); };
+                menu.Items.Add(item);
+            }
+            menu.Show(profileButton, new Point(0, profileButton.Height));
+        }
+
+        private void EditLights()
+        {
+            if (device == null) return;
+            OtherDeviceSnapshot d = device;
+            using (var dialog = new OtherLightDialog(d.Lights))
+            {
+                if (dialog.ShowDialog(FindForm()) != DialogResult.OK || dialog.Changes.Count == 0) return;
+                var changes = new Dictionary<int, OtherLightEffect>(dialog.Changes);
+                Run(c => manager.WriteLights(d.Id, d.ActiveProfile, changes, c));
+            }
+        }
+
+        private void ButtonPicked(int index)
+        {
+            if (updating || device == null) return;
+            var choice = rowCombos[index].SelectedItem as OtherChoice;
+            if (choice == null || index >= device.Buttons.Count || choice.Value.Equals(device.Buttons[index])) return;
+            OtherDeviceSnapshot d = device;
+            var changes = new Dictionary<int, OtherButtonAssignment> { { index, choice.Value } };
+            Run(c => manager.WriteButtons(d.Id, d.ActiveProfile, changes, false, c));
+        }
+
+        // A button handed to the app picks an app action (kept in the INI) instead of a mouse function.
+        private void UpdatePicker(int i, bool appRow)
+        {
+            ActionPicker picker = rowPickers[i];
+            if (!appRow)
+            {
+                if (picker != null) picker.SetShown(false);
+                return;
+            }
+            if (picker == null)
+            {
+                Rectangle row = rowCombos[i].Bounds;
+                int editWidth = S(42), gap = S(4), index = i;
+                picker = new ActionPicker(this, row.Location, row.Width - editWidth - gap, editWidth, gap);
+                picker.Combo.Font = rowCombos[i].Font;
+                picker.Combo.DropDownWidth = S(270);
+                picker.UseChoices(ActionCatalog.ForOtherDevice());
+                picker.Changed += delegate { AppPicked(index); };
+                picker.Combo.MouseEnter += delegate { diagram.Highlight = index; };
+                picker.Combo.MouseLeave += delegate { diagram.Highlight = -1; };
+                rowPickers[i] = picker;
+            }
+            picker.Place(rowCombos[i].Bounds);
+            picker.SetShown(true);
+            ActionBinding stored = getApp(device.Wpid, i);
+            if (pickerText[i] != stored.ToString() && !picker.Combo.DroppedDown)
+            {
+                picker.Binding = stored;
+                pickerText[i] = stored.ToString();
+            }
+        }
+
+        private void AppPicked(int index)
+        {
+            ActionPicker picker = rowPickers[index];
+            if (device == null || picker == null) return;
+            string wpid = device.Wpid;
+            ActionBinding chosen = picker.Binding;
+            if (chosen.Action == MappedAction.AppMouseFunction)
+            {
+                // Let the drop-down close first, then put the stored choice back and offer the mouse functions.
+                picker.Combo.BeginInvoke(new Action(delegate
+                {
+                    picker.Binding = getApp(wpid, index);
+                    ShowMouseFunctionMenu(index);
+                }));
+                return;
+            }
+            setApp(wpid, index, chosen);
+            pickerText[index] = getApp(wpid, index).ToString();
+            Show(device, lastHasBackup);
+        }
+
+        private void ShowMouseFunctionMenu(int index)
+        {
+            OtherDeviceSnapshot d = device;
+            if (d == null || !d.CanEditButtons || busy) return;
+            var menu = new ContextMenuStrip();
+            menu.Items.Add(new ToolStripMenuItem(Lang.T("會寫進滑鼠設定檔，Mac 也會跟著變", "Saved in the mouse, so the Mac changes too")) { Enabled = false });
+            menu.Items.Add(new ToolStripSeparator());
+            foreach (OtherChoice choice in presets)
+            {
+                OtherChoice picked = choice;
+                menu.Items.Add(choice.Title, null, delegate
+                {
+                    var changes = new Dictionary<int, OtherButtonAssignment> { { index, picked.Value } };
+                    Run(c => manager.WriteButtons(d.Id, d.ActiveProfile, changes, false, c));
+                });
+            }
+            menu.Show(rowPickers[index].Combo, new Point(0, rowPickers[index].Combo.Height));
+        }
+
+        private void UpdateButtons()
+        {
+            OtherDeviceSnapshot d = device;
+            updating = true;
+            for (int i = 0; i < rowCombos.Length; i++)
+            {
+                bool shown = d.Link == OtherDeviceLink.Online && i < d.Buttons.Count;
+                bool appRow = shown && d.Wpid == "407F" && d.Buttons[i].AppButton.HasValue;
+                rowNames[i].Visible = shown;
+                rowCombos[i].Visible = shown && !appRow;
+                UpdatePicker(i, appRow);
+                if (!shown || rowCombos[i].DroppedDown) continue;
+                string[] label = OtherDevicesProtocol.ButtonName(d.Wpid, i);
+                rowNames[i].Text = (i + 1) + "  " + Lang.T(label[0], label[1]);
+                ComboBox combo = rowCombos[i];
+                OtherButtonAssignment value = d.Buttons[i];
+                combo.BeginUpdate();
+                combo.Items.Clear();
+                OtherChoice selected = null;
+                if (i == 0)
+                {
+                    // The left button stays a left click, so a wrong choice can never lock the user out.
+                    selected = new OtherChoice { Title = OtherText.Title(value, presets) + Lang.T("（固定）", " (locked)"), Value = value };
+                    combo.Items.Add(selected);
+                }
+                else
+                {
+                    foreach (OtherChoice choice in presets)
+                    {
+                        combo.Items.Add(choice);
+                        if (choice.Value.Equals(value)) selected = choice;
+                    }
+                    if (selected == null)
+                    {
+                        selected = new OtherChoice { Title = OtherText.Title(value, presets), Value = value };
+                        combo.Items.Insert(0, selected);
+                    }
+                }
+                combo.SelectedItem = selected;
+                combo.EndUpdate();
+                combo.Enabled = i != 0 && d.CanEditButtons && !busy;
+            }
+            updating = false;
+        }
+
+        public void Show(OtherDeviceSnapshot d, bool hasBackup)
+        {
+            device = d;
+            lastHasBackup = hasBackup;
+            name.Text = d.Name.Length == 0 ? Lang.T("羅技裝置", "Logitech device") : d.Name;
+            subtitle.Text = OtherText.Subtitle(d);
+            status.Text = "●  " + OtherText.Link(d);
+            status.ForeColor = d.Link == OtherDeviceLink.Online ? Theme.Good : d.Link == OtherDeviceLink.ReceiverGone ? Theme.Warning : d.Link == OtherDeviceLink.Reading ? Theme.Accent : Theme.Muted;
+            bool online = d.Link == OtherDeviceLink.Online;
+            bool hasButtons = online && d.Buttons.Count > 0;
+            bool hasDiagram = hasButtons && d.Wpid == "407F";
+            Image series = online && d.Wpid != "407F" ? OtherDiagrams.ForModel(d.Wpid) : null;
+            bool hasPicture = series != null;
+            familyPicture.Visible = hasPicture;
+            pictureNote.Visible = hasPicture && hasButtons;
+            basicHint.Visible = online && !hasButtons;
+            if (hasPicture && !ReferenceEquals(familyPicture.Image, series)) familyPicture.Image = series;
+            offline.Visible = !online;
+            chips.Visible = online;
+            rule1.Visible = hasButtons;
+            buttonsTitle.Visible = hasButtons;
+            diagram.Visible = hasDiagram;
+            message.Visible = hasButtons && message.Text.Length > 0;
+            buttonsHint.Visible = hasButtons && message.Text.Length == 0;
+            restore.Visible = hasButtons && hasBackup;
+            appWarning.Visible = false;
+            bool needsRepair = online && d.RepairSector.HasValue;
+            repairText.Visible = needsRepair;
+            repair.Visible = needsRepair;
+            if (!online)
+            {
+                offline.Text = OtherText.Offline(d) + (d.BatteryPercent >= 0 ? "\r\n" + Lang.T("上次讀到的電量：", "Last battery reading: ") + OtherText.Battery(d) : "");
+                UpdateButtons();
+                Height = S(122);
+                return;
+            }
+            int y = 50;
+            if (needsRepair)
+            {
+                int index = d.Profiles.IndexOf(d.RepairSector.Value);
+                string number = (index >= 0 ? index + 1 : d.RepairSector.Value).ToString();
+                repairText.Text = Lang.T("設定檔 " + number + " 上次寫入沒有完成，內容可能不完整", "Profile " + number + " didn't finish saving and may be incomplete");
+                y += 36;
+            }
+
+            // Summary tiles share the full width.
+            chips.Bounds = new Rectangle(S(4), S(y), S(Width0 - 8), S(60));
+            batteryTile.SetText(OtherText.BatteryValue(d), OtherText.BatteryNote(d));
+            dpiButton.SetText(d.Dpi > 0 ? d.Dpi + " DPI" : "—",
+                d.StageIndex >= 0 ? Lang.T("第 " + (d.StageIndex + 1) + " 段", "Level " + (d.StageIndex + 1)) : "");
+            rateButton.SetText(d.ReportRateMs > 0 ? OtherDevicesProtocol.ReportRateHz(d.ReportRateMs) + " Hz" : "—",
+                d.ReportRateMs > 0 ? Lang.T("每 " + d.ReportRateMs + " 毫秒", "Every " + d.ReportRateMs + " ms") : "");
+            dpiButton.Visible = d.Dpi > 0;
+            rateButton.Visible = d.ReportRateMs > 0;
+            var tiles = new List<OtherStatTile> { batteryTile };
+            if (d.Dpi > 0) tiles.Add(dpiButton);
+            if (d.ReportRateMs > 0) tiles.Add(rateButton);
+            bool showProfile = d.OnboardMode == 1 && d.Profiles.Count > 1;
+            profileButton.Visible = showProfile;
+            if (showProfile)
+            {
+                profileButton.SetText(d.ProfileNumber.HasValue ? d.ProfileNumber.Value + " / " + d.Profiles.Count : "—", Lang.T("存在滑鼠內", "On the mouse"));
+                tiles.Add(profileButton);
+            }
+            bool showLight = d.Lights.Count > 0 && d.OnboardMode == 1;
+            lightButton.Visible = showLight;
+            if (showLight)
+            {
+                string first = OtherText.Light(d.Lights[0]);
+                bool sameLight = true;
+                foreach (OtherLightEffect light in d.Lights) if (OtherText.Light(light) != first) sameLight = false;
+                lightButton.SetText(sameLight ? first : Lang.T("多種效果", "Mixed"), Lang.T("共 " + d.Lights.Count + " 區", d.Lights.Count + " zones"));
+                tiles.Add(lightButton);
+            }
+            int gap = 8, each = Math.Min(172, (Width0 - 8 - gap * (tiles.Count - 1)) / tiles.Count);
+            for (int t = 0; t < tiles.Count; t++)
+                tiles[t].Bounds = new Rectangle(S(t * (each + gap)), 0, S(each), S(60));
+            y += 68;
+
+            int bottom = y;
+            int artTop = y + 6;
+            if (hasButtons)
+            {
+                rule1.Bounds = new Rectangle(S(4), S(y), S(Width0 - 8), 1);
+                y += 6;
+                int left = hasDiagram || hasPicture ? 206 : 4;
+                int area = Width0 - 4 - left;
+                if (hasDiagram)
+                {
+                    diagram.Bounds = new Rectangle(S(4), S(y), S(194), S(236));
+                    bottom = y + 236;
+                }
+                buttonsTitle.Location = new Point(S(left), S(y + 4));
+                // The title is wider in some languages, so the hint starts after its real width.
+                int titleWidth = (int)Math.Ceiling(buttonsTitle.PreferredWidth * 100F / S(100));
+                int hintLeft = left + titleWidth + 8;
+                int hintRight = Width0 - 4 - (hasBackup ? 164 : 0);
+                buttonsHint.Bounds = new Rectangle(S(hintLeft), S(y + 5), S(hintRight - hintLeft), S(18));
+                message.Bounds = buttonsHint.Bounds;
+                buttonsHint.Text = d.CanEditButtons
+                    ? Lang.T("存在滑鼠裡，App 沒開也有效；寫入前會備份", "Saved in the mouse; works without the app; backed up first")
+                    : d.WriteVerified ? Lang.T("這個設定檔不能改", "This profile can't be changed")
+                    : Lang.T("這個型號還沒實機驗證，先不開放修改", "This model hasn't been verified yet, so editing is off");
+                restore.Bounds = new Rectangle(S(Width0 - 4 - 156), S(y), S(156), S(26));
+                y += 30;
+
+                int rows = (d.Buttons.Count + 1) / 2;
+                int columnWidth = (area - 12) / 2;
+                var appKeys = new List<string>();
+                for (int i = 0; i < d.Buttons.Count && i < rowCombos.Length; i++)
+                {
+                    int column = i < rows ? 0 : 1;
+                    int row = i < rows ? i : i - rows;
+                    int x = left + column * (columnWidth + 12);
+                    rowNames[i].Bounds = new Rectangle(S(x), S(y + row * 30), S(112), S(26));
+                    rowCombos[i].Bounds = new Rectangle(S(x + 114), S(y + row * 30), S(columnWidth - 114), S(26));
+                    if (d.Buttons[i].AppButton.HasValue && (d.Wpid != "407F" || getApp(d.Wpid, i).IsPassThrough))
+                    {
+                        string[] label = OtherDevicesProtocol.ButtonName(d.Wpid, i);
+                        appKeys.Add(Lang.T(label[0], label[1]));
+                    }
+                }
+                y += rows * 30;
+                if (appKeys.Count > 0)
+                {
+                    appWarning.Text = d.Wpid == "407F"
+                        ? Lang.T(string.Join("、", appKeys.ToArray()) + " 還沒選 App 動作，目前按了沒有作用",
+                            string.Join(", ", appKeys.ToArray()) + " have no app action yet, so pressing them does nothing")
+                        : Lang.T(string.Join("、", appKeys.ToArray()) + " 設成「交給 App」，Windows 收不到，按了沒有作用",
+                            string.Join(", ", appKeys.ToArray()) + " are set as app buttons, which Windows can't receive");
+                    appWarning.Bounds = new Rectangle(S(left), S(y), S(area), S(22));
+                    appWarning.Visible = true;
+                    y += 24;
+                }
+                bottom = Math.Max(bottom, y);
+            }
+            if (hasPicture)
+            {
+                familyPicture.Bounds = new Rectangle(S(4), S(artTop), S(194), S(214));
+                pictureNote.Bounds = new Rectangle(S(4), S(artTop + 216), S(194), S(18));
+                bottom = Math.Max(bottom, artTop + 236);
+            }
+            if (!hasButtons)
+            {
+                int hintLeft = hasPicture ? 216 : 4;
+                basicHint.Bounds = new Rectangle(S(hintLeft), S(artTop + 8), S(Width0 - hintLeft - 8), S(48));
+                bottom = Math.Max(bottom, artTop + 60);
+            }
+            UpdateButtons();
+            ApplyEnabled();
+            Height = S(bottom + 2);
+        }
+    }
+
+    // One device fills the page. With several, a tab row picks which one the card below shows.
+    internal sealed class OtherDevicesPage : Panel
+    {
+        private const int TabsWidth = 628, TabGap = 6, ArrowWidth = 26;
+        private readonly OtherDevicesManager manager;
+        private readonly Func<int, int> S;
+        private readonly Func<OtherDeviceSnapshot, bool> hasBackup;
+        private readonly Func<string, int, ActionBinding> getApp;
+        private readonly Action<string, int, ActionBinding> setApp;
+        private readonly Dictionary<string, OtherDeviceCard> cards = new Dictionary<string, OtherDeviceCard>();
+        private readonly List<OtherDeviceTab> tabs = new List<OtherDeviceTab>();
+        private readonly Label empty = new Label(), note = new Label();
+        private readonly Panel list = new Panel(), tabRow = new Panel();
+        private readonly Button reload, previous, next;
+        private List<OtherDeviceSnapshot> shown = new List<OtherDeviceSnapshot>();
+        private string selectedId;
+        private int firstTab;
+        private bool revealSelected;
+
+        public OtherDevicesPage(OtherDevicesManager manager, Func<int, int> scale, Func<OtherDeviceSnapshot, bool> hasBackup,
+            Func<string, int, ActionBinding> getApp, Action<string, int, ActionBinding> setApp)
+        {
+            this.manager = manager;
+            S = scale;
+            this.hasBackup = hasBackup;
+            this.getApp = getApp;
+            this.setApp = setApp;
+            BackColor = Theme.Card;
+            list.BackColor = Theme.Card;
+            list.AutoScroll = true;
+            Controls.Add(list);
+            tabRow.BackColor = Theme.Card;
+            tabRow.Visible = false;
+            tabRow.Bounds = new Rectangle(S(4), 0, S(TabsWidth), S(34));
+            Controls.Add(tabRow);
+            previous = Theme.CreateButton("‹", false);
+            previous.Click += delegate { firstTab--; LayoutTabs(); };
+            tabRow.Controls.Add(previous);
+            next = Theme.CreateButton("›", false);
+            next.Click += delegate { firstTab++; LayoutTabs(); };
+            tabRow.Controls.Add(next);
+            empty.ForeColor = Theme.Muted;
+            empty.UseMnemonic = false;
+            empty.Bounds = new Rectangle(S(8), S(8), S(716), S(120));
+            empty.Text = Lang.T("沒有偵測到其他羅技裝置。\r\n\r\n把羅技接收器插到這台電腦並打開裝置，這一頁就會列出它的電量與狀態。目前支援 Lightspeed、Unifying 與 Nano 接收器上的羅技裝置（例如 G502 LIGHTSPEED、M331）。MX Master 4 與鍵盤在各自的頁面，Logi Bolt 接收器的配對在「接收器」頁。",
+                "No other Logitech devices found.\r\n\r\nPlug a Logitech receiver into this computer and turn the device on to see its battery and status here. Supports devices on Lightspeed, Unifying and Nano receivers (for example G502 LIGHTSPEED or M331). MX Master 4 and the keyboard have their own pages; Logi Bolt pairing is on the Receiver page.");
+            list.Controls.Add(empty);
+            note.ForeColor = Theme.Muted;
+            note.Font = new Font(Theme.UiFont, 8.5F);
+            note.AutoEllipsis = true;
+            note.TextAlign = ContentAlignment.MiddleLeft;
+            note.Bounds = new Rectangle(S(8), S(372), S(600), S(28));
+            note.Text = Lang.T("只回報電壓的裝置（例如 G502），電量是依電壓表換算的估計值。", "For devices that report only a voltage (such as G502), the battery level is an estimate.");
+            Controls.Add(note);
+            reload = Theme.CreateButton(Lang.T("重新整理", "Refresh"), false);
+            reload.Click += delegate { if (manager != null) manager.Refresh(true); };
+            Controls.Add(reload);
+            Arrange(false);
+        }
+
+        // Several devices: tabs on top, Refresh beside them, and the note gives its row to the card.
+        private void Arrange(bool several)
+        {
+            tabRow.Visible = several;
+            note.Visible = !several;
+            list.Bounds = several ? new Rectangle(0, S(40), S(744), S(362)) : new Rectangle(0, 0, S(744), S(368));
+            reload.Bounds = several ? new Rectangle(S(638), S(2), S(96), S(30)) : new Rectangle(S(620), S(372), S(110), S(28));
+        }
+
+        public void SelectDevice(string id)
+        {
+            if (id == selectedId) return;
+            selectedId = id;
+            revealSelected = true;
+            list.AutoScrollPosition = Point.Empty;
+            ShowDevices(shown);
+        }
+
+        public void ShowDevices(List<OtherDeviceSnapshot> devices)
+        {
+            shown = devices;
+            var keep = new HashSet<string>();
+            foreach (OtherDeviceSnapshot d in devices) keep.Add(d.Id);
+            foreach (string id in new List<string>(cards.Keys))
+            {
+                if (keep.Contains(id)) continue;
+                list.Controls.Remove(cards[id]);
+                cards[id].Dispose();
+                cards.Remove(id);
+            }
+            if (selectedId == null || !keep.Contains(selectedId))
+            {
+                OtherDeviceSnapshot first = devices.Find(d => d.Link == OtherDeviceLink.Online);
+                if (first == null && devices.Count > 0) first = devices[0];
+                selectedId = first != null ? first.Id : null;
+            }
+            empty.Visible = devices.Count == 0;
+            bool several = devices.Count > 1;
+            Arrange(several);
+            list.SuspendLayout();
+            foreach (OtherDeviceSnapshot d in devices)
+            {
+                OtherDeviceCard card;
+                if (!cards.TryGetValue(d.Id, out card))
+                {
+                    card = new OtherDeviceCard(manager, S, getApp, setApp);
+                    cards[d.Id] = card;
+                    list.Controls.Add(card);
+                }
+                bool current = d.Id == selectedId;
+                if (current) card.Show(d, hasBackup(d));
+                card.Location = new Point(S(4), list.AutoScrollPosition.Y + S(several ? 0 : 4));
+                card.Visible = current;
+            }
+            list.ResumeLayout();
+            if (several) LayoutTabs();
+        }
+
+        private static string TabTitle(OtherDeviceSnapshot d, List<OtherDeviceSnapshot> all)
+        {
+            string name = OtherText.ShortName(d);
+            int same = 0;
+            foreach (OtherDeviceSnapshot other in all) if (OtherText.ShortName(other) == name) same++;
+            return same > 1 ? name + " #" + d.Slot : name;
+        }
+
+        private void LayoutTabs()
+        {
+            while (tabs.Count < shown.Count)
+            {
+                var tab = new OtherDeviceTab();
+                tab.Click += delegate { SelectDevice(tab.DeviceId); };
+                tabs.Add(tab);
+                tabRow.Controls.Add(tab);
+            }
+            while (tabs.Count > shown.Count)
+            {
+                OtherDeviceTab extra = tabs[tabs.Count - 1];
+                tabs.RemoveAt(tabs.Count - 1);
+                tabRow.Controls.Remove(extra);
+                extra.Dispose();
+            }
+            int count = shown.Count;
+            if (count == 0) return;
+            int width = Math.Max(104, Math.Min(150, (TabsWidth - TabGap * (count - 1)) / count));
+            int fit = (TabsWidth + TabGap) / (width + TabGap);
+            bool overflow = count > fit;
+            if (overflow)
+            {
+                int room = TabsWidth - 2 * (ArrowWidth + TabGap);
+                fit = Math.Max(1, (room + TabGap) / (104 + TabGap));
+                width = (room - TabGap * (fit - 1)) / fit;
+            }
+            int selectedIndex = shown.FindIndex(d => d.Id == selectedId);
+            // Only a new selection scrolls the tabs; the arrows must not snap back on the next refresh.
+            if (revealSelected && selectedIndex >= 0)
+            {
+                if (selectedIndex < firstTab) firstTab = selectedIndex;
+                else if (selectedIndex >= firstTab + fit) firstTab = selectedIndex - fit + 1;
+            }
+            revealSelected = false;
+            firstTab = Math.Max(0, Math.Min(firstTab, count - fit));
+            int x = 0;
+            previous.Visible = overflow;
+            next.Visible = overflow;
+            if (overflow)
+            {
+                previous.Bounds = new Rectangle(0, S(2), S(ArrowWidth), S(30));
+                next.Bounds = new Rectangle(S(TabsWidth - ArrowWidth), S(2), S(ArrowWidth), S(30));
+                previous.Enabled = firstTab > 0;
+                next.Enabled = firstTab + fit < count;
+                x = ArrowWidth + TabGap;
+            }
+            for (int i = 0; i < count; i++)
+            {
+                OtherDeviceSnapshot d = shown[i];
+                OtherDeviceTab tab = tabs[i];
+                bool online = d.Link == OtherDeviceLink.Online;
+                string state = online ? (d.BatteryPercent >= 0 ? d.BatteryPercent + "%" : "—") : Lang.T("離線", "Offline");
+                tab.Set(d.Id, TabTitle(d, shown), state, online, i == selectedIndex);
+                bool visible = i >= firstTab && i < firstTab + fit;
+                tab.Visible = visible;
+                if (visible)
+                {
+                    tab.Bounds = new Rectangle(S(x), S(2), S(width), S(30));
+                    x += width + TabGap;
+                }
+            }
+        }
+
+        public void RefreshTimes() { if (shown.Count > 0) ShowDevices(shown); }
+    }
+    // ---- Other devices page end ----
+
     internal sealed class DeviceSnapshot
     {
         public string Transport = "";
@@ -10108,6 +15127,8 @@ namespace MXMasterWin
         private readonly Action<string> report;
         private readonly Action<string, int, int, bool> vendorButton;
         private readonly Dictionary<IntPtr, string> names = new Dictionary<IntPtr, string>();
+        private readonly Dictionary<IntPtr, bool> lightspeedDevices = new Dictionary<IntPtr, bool>();
+        private uint lastLightspeedRaw;
         private readonly Dictionary<int, HashSet<int>> divertedPressed = new Dictionary<int, HashSet<int>>();
         private volatile int divertedDeviceIndex = -1;
         private volatile int divertedFeatureIndex = -1;
@@ -10239,7 +15260,20 @@ namespace MXMasterWin
                     name = DeviceName(header.hDevice);
                     names[header.hDevice] = name;
                 }
-                if (!IsMx(name)) return;
+                if (!IsMx(name))
+                {
+                    // Engineering log only: shows whether Windows reports buttons above 5 from a Lightspeed mouse.
+                    if (header.dwType == 0 && IsLightspeed(header.hDevice, name))
+                    {
+                        RAWMOUSE other = (RAWMOUSE)Marshal.PtrToStructure(new IntPtr(mem.ToInt64() + Marshal.SizeOf(typeof(RAWINPUTHEADER))), typeof(RAWMOUSE));
+                        if (other.usButtonFlags != 0 || other.ulRawButtons != lastLightspeedRaw)
+                        {
+                            lastLightspeedRaw = other.ulRawButtons;
+                            report("OtherButton flags=0x" + other.usButtonFlags.ToString("X4") + " raw=0x" + other.ulRawButtons.ToString("X8"));
+                        }
+                    }
+                    return;
+                }
                 string transport = TransportName(name);
                 int offset = Marshal.SizeOf(typeof(RAWINPUTHEADER));
                 if (header.dwType == 0)
@@ -10313,6 +15347,17 @@ namespace MXMasterWin
                     vendorButton(transport, deviceIndex, cid, isPressed);
             }
             divertedPressed[deviceIndex] = next;
+        }
+
+        private bool IsLightspeed(IntPtr device, string name)
+        {
+            bool known;
+            if (lightspeedDevices.TryGetValue(device, out known)) return known;
+            string upper = (name ?? "").ToUpperInvariant();
+            foreach (int pid in OtherDevicesProtocol.LightspeedReceivers)
+                if (upper.Contains("VID_046D&PID_" + pid.ToString("X4"))) known = true;
+            lightspeedDevices[device] = known;
+            return known;
         }
 
         private static bool IsMx(string name)
